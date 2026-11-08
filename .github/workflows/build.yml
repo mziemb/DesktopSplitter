@@ -81,6 +81,27 @@ jobs:
           Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include\*\um\iddcx\*\IddCx.h" |
             ForEach-Object { Write-Host "IddCx: $($_.FullName)" }
 
+      - name: Diagnose PowerShell Security module
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "PowerShell 7:"
+          $PSVersionTable.PSVersion
+          Write-Host "PSModulePath:"
+          $env:PSModulePath
+
+          Write-Host "Testing Windows PowerShell 5.1:"
+          & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -NoProfile -Command '
+              $PSVersionTable.PSVersion
+              Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+              Get-Command Get-AuthenticodeSignature
+            '
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell Security module failed"
+          }
+
       # -------------------------------------------------------------- build
       # build.ps1 builds everything in order: driver (test-signed catalog),
       # compositor, devcreate, edidoverride, app publish, then the setup exe
