@@ -25,13 +25,34 @@ jobs:
       # The runner image ships Visual Studio + Windows SDKs but NOT the WDK,
       # and not the "Windows Driver Kit" VS component that provides the
       # WindowsUserModeDriver10.0 platform toolset. Install both.
+     
       - name: Install Windows Driver Kit
         shell: pwsh
         run: |
-          winget install --id Microsoft.WindowsWDK.10.0.26100 --exact `
-            --accept-source-agreements --accept-package-agreements `
-            --disable-interactivity
-          if ($LASTEXITCODE -ne 0) { throw "winget WDK install failed ($LASTEXITCODE)" }
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://download.microsoft.com/download/41fb59c2-1723-45f9-a270-96b73ad58233/KIT_BUNDLE_WDK_MEDIACREATION/wdksetup.exe'
+          $installer = Join-Path $env:RUNNER_TEMP 'wdksetup.exe'
+
+          Write-Host "Downloading WDK 26100..."
+          Invoke-WebRequest -Uri $url -OutFile $installer
+
+          $signature = Get-AuthenticodeSignature $installer
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
+            throw "WDK installer signature verification failed"
+          }
+
+          Write-Host "Installing WDK..."
+          $p = Start-Process -FilePath $installer `
+            -ArgumentList '/quiet', '/norestart' `
+            -Wait -PassThru
+
+          if ($p.ExitCode -notin @(0, 3010)) {
+            throw "WDK installation failed: $($p.ExitCode)"
+          }
+
+          Write-Host "WDK installation completed"
+
 
       - name: Add WDK component to Visual Studio
         shell: pwsh
