@@ -77,24 +77,45 @@ foreach ($item in $wanted) {
 }
 
 $catPath = ($resolved | Where-Object { $_.Target -eq 'DesktopSplitterVdd.cat' }).Path
+# Verify the catalog signature in a clean Windows PowerShell 5.1 process.
+# Some CI runners have a conflicting PSModulePath that breaks Security module loading.
+$psExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path -LiteralPath $psExe)) { Fail "Windows PowerShell executable not found: $psExe" }
 
-Write-Host "=== PowerShell diagnostics ==="
-Write-Host "PowerShell version: $($PSVersionTable.PSVersion)"
-Write-Host "PSHOME: $PSHOME"
-Write-Host "PSModulePath: $env:PSModulePath"
-
+$verifyScript = @'
+param([Parameter(Mandatory=$true)][string] $FilePath)
+$ErrorActionPreference = 'Stop'
+# The built-in Security module lives under PSHOME; avoid third-party modules.
+$env:PSModulePath = Join-Path $PSHOME 'Modules'
 Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+$s = Get-AuthenticodeSignature -LiteralPath $FilePath -ErrorAction Stop
+[pscustomobject]@{
+    Status = $s.Status.ToString()
+    Subject = if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { $null }
+    Thumbprint = if ($s.SignerCertificate) { $s.SignerCertificate.Thumbprint } else { $null }
+} | ConvertTo-Json -Compress
+'@
+$verifyFile = Join-Path ([IO.Path]::GetTempPath()) ("DesktopSplitter-verify-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+try {
+    Set-Content -LiteralPath $verifyFile -Value $verifyScript -Encoding UTF8
+    $verifyOutput = @(& $psExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $verifyFile -FilePath $catPath 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        Fail ("signature verification subprocess failed (exit $LASTEXITCODE): " + ($verifyOutput -join "`n"))
+    }
+    $json = ($verifyOutput | Out-String).Trim()
+    try { $sig = $json | ConvertFrom-Json -ErrorAction Stop }
+    catch { Fail "invalid signature verification output: $json" }
+} finally {
+    Remove-Item -LiteralPath $verifyFile -Force -ErrorAction SilentlyContinue
+}
 
-Write-Host "Security module loaded successfully"
-
-$sig = Get-AuthenticodeSignature $catPath
-if ($sig.Status -eq 'NotSigned' -or -not $sig.SignerCertificate) {
-    Fail ("$catPath is NOT Authenticode signed.`n" +
+if (-not $sig -or $sig.Status -eq 'NotSigned' -or -not $sig.Subject -or -not $sig.Thumbprint) {
+    Fail ("$catPath is NOT Authenticode signed or signature information is missing.`n" +
           "         Sign it first:  installer\sign-dev.ps1")
 }
 
-$subject = $sig.SignerCertificate.Subject
-$thumb = $sig.SignerCertificate.Thumbprint
+$subject = $sig.Subject
+$thumb = $sig.Thumbprint
 if ($sig.Status -eq 'Valid') {
     Write-Host "stage-payload : catalog signature is trusted on this machine ($subject)"
 } else {
