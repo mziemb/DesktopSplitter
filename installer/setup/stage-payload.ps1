@@ -77,6 +77,16 @@ foreach ($item in $wanted) {
 }
 
 $catPath = ($resolved | Where-Object { $_.Target -eq 'DesktopSplitterVdd.cat' }).Path
+
+Write-Host "=== PowerShell diagnostics ==="
+Write-Host "PowerShell version: $($PSVersionTable.PSVersion)"
+Write-Host "PSHOME: $PSHOME"
+Write-Host "PSModulePath: $env:PSModulePath"
+
+Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+
+Write-Host "Security module loaded successfully"
+
 $sig = Get-AuthenticodeSignature $catPath
 if ($sig.Status -eq 'NotSigned' -or -not $sig.SignerCertificate) {
     Fail ("$catPath is NOT Authenticode signed.`n" +
