@@ -201,7 +201,18 @@ foreach ($name in @('DesktopSplitterVdd.inf', 'DesktopSplitterVdd.dll', 'Desktop
     $p = Join-Path $OutDir $name
     if (-not (Test-Path $p)) { Fail "expected staged file missing: $p" }
     $len = (Get-Item $p).Length
-    $staged += [pscustomobject]@{ Name = $name; Bytes = $len; Sha256 = (Get-FileHash $p -Algorithm SHA256).Hash }
+    # Calculate SHA-256 via .NET to avoid Get-FileHash module-loading issues in CI.
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($p)
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+            $hash = [System.BitConverter]::ToString($hashBytes).Replace('-', '')
+        }
+        finally { $stream.Dispose() }
+    }
+    finally { $sha256.Dispose() }
+    $staged += [pscustomobject]@{ Name = $name; Bytes = $len; Sha256 = $hash }
     Write-Host ("stage-payload : staged {0,-24} {1,12:N0} bytes" -f $name, $len)
 }
 
