@@ -3,11 +3,10 @@ name: Build DesktopSplitter
 on:
   push:
     branches: ['**']
-    tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: write   # needed to create/update releases
+  contents: read
 
 concurrency:
   group: build-${{ github.ref }}
@@ -16,171 +15,95 @@ concurrency:
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 60
-
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      # ---------------------------------------------------------------- WDK
-      # The runner image ships Visual Studio + Windows SDKs but NOT the WDK,
-      # and not the "Windows Driver Kit" VS component that provides the
-      # WindowsUserModeDriver10.0 platform toolset. Install both.
-     
       - name: Install Windows Driver Kit
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $url = 'https://download.microsoft.com/download/41fb59c2-1723-45f9-a270-96b73ad58233/KIT_BUNDLE_WDK_MEDIACREATION/wdksetup.exe'
           $installer = Join-Path $env:RUNNER_TEMP 'wdksetup.exe'
-
-          Write-Host "Downloading WDK 26100..."
           Invoke-WebRequest -Uri $url -OutFile $installer
-
-          $signature = Get-AuthenticodeSignature $installer
-          if ($signature.Status -ne 'Valid' -or
-              $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
-            throw "WDK installer signature verification failed"
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
+            throw 'WDK installer signature verification failed'
           }
-
-          Write-Host "Installing WDK..."
-          $p = Start-Process -FilePath $installer `
-            -ArgumentList '/quiet', '/norestart' `
-            -Wait -PassThru
-
-          if ($p.ExitCode -notin @(0, 3010)) {
-            throw "WDK installation failed: $($p.ExitCode)"
-          }
-
-          Write-Host "WDK installation completed"
-
+          $p = Start-Process -FilePath $installer -ArgumentList '/quiet', '/norestart' -Wait -PassThru
+          if ($p.ExitCode -notin @(0, 3010)) { throw "WDK installation failed: $($p.ExitCode)" }
 
       - name: Add WDK component to Visual Studio
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = & $vswhere -latest -requires Microsoft.Component.MSBuild -property installationPath
-          if (-not $vs) { throw "Visual Studio not found" }
+          if (-not $vs) { throw 'Visual Studio not found' }
           $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
           $p = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList `
             'modify', '--installPath', "`"$vs`"", `
             '--add', 'Component.Microsoft.Windows.DriverKit', `
             '--quiet', '--norestart'
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "VS modify failed ($($p.ExitCode))" }
+          if ($p.ExitCode -notin @(0, 3010)) { throw "VS modify failed: $($p.ExitCode)" }
 
-      - name: Verify driver toolset present
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -requires Microsoft.Component.MSBuild -property installationPath
-          $toolsets = Get-ChildItem "$vs\MSBuild\Microsoft\VC\*\Platforms\x64\PlatformToolsets\*" -Directory |
-            Select-Object -ExpandProperty Name
-          Write-Host "Toolsets: $($toolsets -join ', ')"
-          if ($toolsets -notcontains 'WindowsUserModeDriver10.0') {
-            throw "WindowsUserModeDriver10.0 toolset missing after WDK install"
-          }
-          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include\*\um\iddcx\*\IddCx.h" |
-            ForEach-Object { Write-Host "IddCx: $($_.FullName)" }
-
-      - name: Diagnose PowerShell Security module
+      - name: Diagnose WDK and MSBuild dependencies
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "PowerShell 7:"
-          $PSVersionTable.PSVersion
-          Write-Host "PSModulePath:"
-          $env:PSModulePath
-
-          Write-Host "Testing Windows PowerShell 5.1:"
-          & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
-            -NoProfile -Command '
-              $PSVersionTable.PSVersion
-              Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
-              Get-Command Get-AuthenticodeSignature
-            '
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows PowerShell Security module failed"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.Component.MSBuild -property installationPath
+          Write-Host "VS: $vs"
+          $msbuild = Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
+          & $msbuild -version
+          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10\build"
+          $taskFiles = @(Get-ChildItem $kits -Recurse -Filter 'Microsoft.DriverKit.Build.Tasks*.dll' -File -ErrorAction SilentlyContinue)
+          if ($taskFiles.Count -eq 0) { throw 'No WDK build tasks DLL found' }
+          foreach ($file in $taskFiles) {
+            Write-Host "WDK task assembly: $($file.FullName)"
+            try {
+              $asm = [System.Reflection.AssemblyName]::GetAssemblyName($file.FullName)
+              Write-Host "  Assembly version: $($asm.Version)"
+            } catch { Write-Warning $_.Exception.Message }
+          }
+          $toolsets = @(Get-ChildItem "$vs\MSBuild\Microsoft\VC\*\Platforms\x64\PlatformToolsets\*" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+          Write-Host "Toolsets: $($toolsets -join ', ')"
+          if ($toolsets -notcontains 'WindowsUserModeDriver10.0') { throw 'WindowsUserModeDriver10.0 toolset missing' }
+          $dll = Join-Path $kits '10.0.26100.0\bin\Microsoft.DriverKit.Build.Tasks.18.0.dll'
+          if (Test-Path $dll) {
+            Write-Host 'WDK task DLL dependencies:'
+            try { [System.Reflection.Assembly]::LoadFrom($dll) | Out-Null; Write-Host 'Assembly loaded in PowerShell runtime' }
+            catch { Write-Warning "Assembly load test: $($_.Exception.ToString())" }
           }
 
-      # -------------------------------------------------------------- build
-      # build.ps1 builds everything in order: driver (test-signed catalog),
-      # compositor, devcreate, edidoverride, app publish, then the setup exe
-      # that embeds all of it. Inf2CatUseLocalTime is already handled inside.
-      # -NoVersionBump: the root VERSION file is the single source of truth and
-      # is bumped by developers' local builds. CI must never increment it -
-      # nothing here could commit the change back, so bumping would only cause
-      # version drift and a dirty working tree.
       - name: Build all (Release)
         id: build
         shell: pwsh
         run: .\build.ps1 -Configuration Release -NoVersionBump
 
-      # -------------------------------------------------------------- check
-      # CI runners execute elevated, so the shipping exe can run directly.
-      # /verify inspects the embedded payload and signature without changing
-      # anything; /selftest walks the wizard UI headlessly at several DPIs.
       - name: Installer self-checks
         shell: pwsh
         run: |
-          $exe = "installer\setup\bin\x64\Release\DesktopSplitterSetup.exe"
-          & $exe /verify   | Write-Host
+          $exe = 'installer\setup\bin\x64\Release\DesktopSplitterSetup.exe'
+          if (-not (Test-Path $exe)) { throw "Installer missing: $exe" }
+          & $exe /verify | Write-Host
           if ($LASTEXITCODE -ne 0) { throw "/verify failed ($LASTEXITCODE)" }
           & $exe /selftest | Write-Host
           if ($LASTEXITCODE -ne 0) { throw "/selftest failed ($LASTEXITCODE)" }
 
-      # The real product version comes from the root VERSION file (build.ps1
-      # also emits it as a step output and to build\generated\version.txt).
-      # A v* tag still wins, so a tagged release is named after its tag.
       - name: Stamp artifact name
         id: stamp
         shell: pwsh
         run: |
-          $version = "${{ steps.build.outputs.version }}"
-          if (-not $version) {
-            $version = (Get-Content "build\generated\version.txt" -Raw).Trim()
-          }
-          if (-not $version) { throw "could not determine the product version" }
-
-          if ("${{ github.ref_type }}" -eq "tag") {
-            $tagVersion = "${{ github.ref_name }}".TrimStart('v')
-            if ($tagVersion -ne $version) {
-              Write-Warning "tag $tagVersion does not match VERSION $version - using the tag"
-            }
-            $version = $tagVersion
-          }
-
-          Write-Host "Product version: $version"
+          $version = '${{ steps.build.outputs.version }}'
+          if (-not $version) { $version = (Get-Content 'build\generated\version.txt' -Raw).Trim() }
+          if (-not $version) { throw 'could not determine product version' }
           "version=$version" >> $env:GITHUB_OUTPUT
-          Copy-Item "installer\setup\bin\x64\Release\DesktopSplitterSetup.exe" `
-                    "DesktopSplitterSetup-$version.exe"
+          Copy-Item 'installer\setup\bin\x64\Release\DesktopSplitterSetup.exe' "DesktopSplitterSetup-$version.exe"
 
-      - name: Upload build artifact
+      - name: Upload build artifact (not a public release)
         uses: actions/upload-artifact@v4
         with:
           name: DesktopSplitterSetup-${{ steps.stamp.outputs.version }}
           path: DesktopSplitterSetup-${{ steps.stamp.outputs.version }}.exe
           compression-level: 0
-
-      # ------------------------------------------------------------ release
-      # Every push to the default branch refreshes a rolling "latest" pre-
-      # release; pushing a v* tag creates a real versioned release.
-      - name: Update rolling "latest" release
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: Latest build (${{ steps.stamp.outputs.version }})
-          prerelease: true
-          body: |
-            Automatic build of commit ${{ github.sha }}.
-            Unsigned development build — the installer will ask you to trust
-            the development certificate. See README for details.
-          files: DesktopSplitterSetup-${{ steps.stamp.outputs.version }}.exe
-
-      - name: Create tagged release
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
-        with:
-          name: DesktopSplitter ${{ github.ref_name }}
-          files: DesktopSplitterSetup-${{ steps.stamp.outputs.version }}.exe
-          generate_release_notes: true
