@@ -36,7 +36,10 @@ public sealed class AppSettings
     [JsonPropertyName("previousPrimaryFriendlyName")]
     public string PreviousPrimaryFriendlyName { get; set; } = string.Empty;
 
-    /// <summary>Device name of the virtual monitor that Apply promoted to primary (segment 1).</summary>
+    [JsonPropertyName("primarySegmentIndex")]
+    public int PrimarySegmentIndex { get; set; }
+
+    /// <summary>GDI name of the monitor confirmed as primary after Apply.</summary>
     [JsonPropertyName("appliedPrimaryDevice")]
     public string AppliedPrimaryDevice { get; set; } = string.Empty;
 

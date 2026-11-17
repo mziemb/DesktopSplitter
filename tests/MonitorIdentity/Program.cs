@@ -150,4 +150,5 @@ Test("duplicate logical IDs cannot match even if only one panel is connected", (
     b.StableMonitorId = a.StableMonitorId; var live = Physical("a", 1);
     Check(c.Match(live, new[] { live }) is null);
 });
-Console.WriteLine($"{passed} identity tests passed; no Windows display APIs were called.");
+PrimaryPreservationTests.Run(Test, Check);
+Console.WriteLine($"{passed} tests passed; no Windows display APIs were called.");

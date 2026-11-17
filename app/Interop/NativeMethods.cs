@@ -14,6 +14,17 @@ internal static class NativeMethods
     internal const uint QDC_ONLY_ACTIVE_PATHS = 0x00000002;
     internal const uint QDC_DATABASE_CURRENT = 0x00000004;
 
+    internal const uint SDC_USE_SUPPLIED_DISPLAY_CONFIG = 0x00000020;
+    internal const uint SDC_VALIDATE = 0x00000040;
+    internal const uint SDC_APPLY = 0x00000080;
+    internal const uint SDC_SAVE_TO_DATABASE = 0x00000200;
+    internal const uint DISPLAYCONFIG_PATH_MODE_IDX_INVALID = 0xFFFFFFFF;
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    internal static extern int SetDisplayConfig(
+        uint numPathArrayElements, [In] DISPLAYCONFIG_PATH_INFO[] pathArray,
+        uint numModeInfoArrayElements, [In] DISPLAYCONFIG_MODE_INFO[] modeInfoArray, uint flags);
+
     internal const int ERROR_SUCCESS = 0;
     internal const int ERROR_INSUFFICIENT_BUFFER = 122;
 

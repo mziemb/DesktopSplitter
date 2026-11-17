@@ -68,8 +68,6 @@ public sealed class MainViewModel : ObservableObject
 
         AppendStatus("Ready.");
 
-        // If a previous session died while the physical monitor was hidden, put it back.
-        _ = RecoverThenRefreshAsync();
     }
 
     // ------------------------------------------------------------------ bound state
@@ -199,8 +197,32 @@ public sealed class MainViewModel : ObservableObject
     /// </summary>
     public async Task AutoApplyOnStartupAsync()
     {
+        bool splitActive;
+        IsBusy = true;
+        try
+        {
+            await Task.Run(() =>
+            {
+                SpecializationHashStore.SeedKnownHashes(Monitors.ToList(), _progress);
+                ApplyService.RecoverInterruptedDisplayOperation(_progress);
+            }).ConfigureAwait(true);
+            splitActive = await Task.Run(HidingStatus.IsSplitActive).ConfigureAwait(true);
+            LoadMonitors(announce: false);
+            await Hiding.RefreshAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            AppendStatus("Startup display recovery incomplete: " + ex.Message);
+            return;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+
         AppSettings? settings = SettingsStore.Load();
-        bool splitActive = await Task.Run(HidingStatus.IsSplitActive).ConfigureAwait(true);
+        if (splitActive && CompositorLauncher.IsRunning())
+            StartSuspensionWatcher();
 
         if (!ApplyService.ShouldAutoApplyOnStartup(settings, splitActive)) return;
         if (!RestoreSettings(settings))
@@ -223,7 +245,8 @@ public sealed class MainViewModel : ObservableObject
         {
             StopSuspensionWatcher(restorePrimary: false);
 
-            if (!HidingStatus.IsSplitActive())
+            bool splitActive = HidingStatus.IsSplitActive();
+            if (!splitActive && DisplayRecoveryStore.ForUser.Load() is null)
             {
                 ApplyService.MarkSplitInactive(deliberate: false);
                 return;
@@ -231,11 +254,11 @@ public sealed class MainViewModel : ObservableObject
 
             var log = new Progress<string>(_ => { });
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            ApplyService.Revert(log, cts.Token);
+            ApplyService.Revert(log, cts.Token, deliberate: false);
 
             // Exiting is not a deliberate revert: the configuration should come back next launch.
             AppSettings? settings = SettingsStore.Load();
-            if (settings is not null)
+            if (splitActive && settings is not null)
             {
                 settings.SplitActiveOnExit = true;
                 SettingsStore.Save(settings);
@@ -276,9 +299,26 @@ public sealed class MainViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _selectedLayout, value)) return;
+            UpdatePrimarySegments(0);
             RebuildSegments(resetSizes: true);
             RaiseCommandStates();
         }
+    }
+
+    public IEnumerable<string> PrimarySegments =>
+        Enumerable.Range(1, SelectedLayout?.SegmentCount ?? 0).Select(i => $"Segment {i}");
+
+    private int _primarySegmentIndex;
+    public int PrimarySegmentIndex
+    {
+        get => _primarySegmentIndex;
+        set => SetProperty(ref _primarySegmentIndex, value);
+    }
+
+    private void UpdatePrimarySegments(int selected)
+    {
+        OnPropertyChanged(nameof(PrimarySegments));
+        PrimarySegmentIndex = Math.Clamp(selected, 0, Math.Max(0, (SelectedLayout?.SegmentCount ?? 1) - 1));
     }
 
     /// <summary>Read-only: every segment runs at the physical monitor's max refresh.</summary>
@@ -371,28 +411,6 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand MinimizeToTrayCommand { get; }
 
     public event EventHandler? MinimizeToTrayRequested;
-
-    /// <summary>
-    /// Crash recovery: a previous session may have died with the physical monitor still removed
-    /// from the desktop. Awaiting (rather than TaskScheduler.FromCurrentSynchronizationContext)
-    /// keeps this working when the view-model is constructed without a synchronisation context.
-    /// </summary>
-    private async Task RecoverThenRefreshAsync()
-    {
-        try
-        {
-            await Task.Run(() =>
-            {
-                SpecializationHashStore.SeedKnownHashes(Monitors.ToList(), _progress);
-                ApplyService.RecoverStaleSpecialization(_progress);
-            }).ConfigureAwait(true);
-            await Hiding.RefreshAsync().ConfigureAwait(true);
-        }
-        catch (Exception ex)
-        {
-            AppendStatus("Display-hiding recovery check failed: " + ex.Message);
-        }
-    }
 
     // ------------------------------------------------------------------ monitor list
 
@@ -768,12 +786,14 @@ public sealed class MainViewModel : ObservableObject
             Layout = layout,
             Resolutions = resolutions,
             HidePhysicalDisplay = Hiding.IntentOn,
+            PrimarySegmentIndex = Math.Max(0, PrimarySegmentIndex),
             SpecializationUi = Hiding.CreateSpecializationUi(() => Monitors.Where(m => m.IsActive).ToList()),
             PromptToConfirm = promptToConfirm,
             Confirmer = _applyConfirmer,
         };
 
         IsBusy = true;
+        StopSuspensionWatcher(restorePrimary: false);
         AppendStatus($"--- Applying '{layout.Name}' to {physical.DisplayLabel} ({physical.DeviceName}) ---");
         try
         {
@@ -783,7 +803,8 @@ public sealed class MainViewModel : ObservableObject
                 ? $"Change reverted — restored {result.RollbackDescription}."
                 : $"Done. {result.VirtualMonitors.Count} virtual monitor(s) active.");
 
-            if (!result.RolledBack) StartSuspensionWatcher();
+            if (CompositorLauncher.IsRunning()) StartSuspensionWatcher();
+
         }
         catch (ApplyException ex)
         {
@@ -821,6 +842,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task RevertAsync()
     {
+        if (IsBusy) return;
         IsBusy = true;
         AppendStatus("--- Reverting ---");
 
@@ -830,7 +852,8 @@ public sealed class MainViewModel : ObservableObject
 
         try
         {
-            await Task.Run(() => ApplyService.Revert(_progress, CancellationToken.None)).ConfigureAwait(true);
+            var ui = Hiding.CreateSpecializationUi(() => Monitors.Where(m => m.IsActive).ToList());
+            await Task.Run(() => ApplyService.Revert(_progress, CancellationToken.None, ui)).ConfigureAwait(true);
         }
         catch (ApplyException ex)
         {
@@ -958,6 +981,7 @@ public sealed class MainViewModel : ObservableObject
 
         OnPropertyChanged(nameof(SelectedMonitor));
         OnPropertyChanged(nameof(SelectedLayout));
+        UpdatePrimarySegments(settings.PrimarySegmentIndex);
         UpdateModeTexts();
         RebuildSegments(resetSizes: true);
 

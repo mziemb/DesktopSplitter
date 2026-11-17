@@ -106,7 +106,7 @@ public sealed class SplitSuspensionWatcher : IDisposable
         if (restorePrimary && IsSuspended)
         {
             _log.Report("Restoring the split's primary display before stopping the watcher.");
-            MoveTo(_activePrimaryDevice, "segment 1");
+            MoveTo(_activePrimaryDevice, "the primary selected during Apply");
         }
 
         IsSuspended = false;
@@ -177,7 +177,7 @@ public sealed class SplitSuspensionWatcher : IDisposable
             if (IsSuspended && HidingStatus.IsSplitActive())
             {
                 _log.Report("Compositor events disappeared while suspended — restoring the split's primary.");
-                if (MoveTo(_activePrimaryDevice, "segment 1")) IsSuspended = false;
+                if (MoveTo(_activePrimaryDevice, "the primary selected during Apply")) IsSuspended = false;
             }
             return;
         }
@@ -201,7 +201,7 @@ public sealed class SplitSuspensionWatcher : IDisposable
         else
         {
             _log.Report($"Secure desktop dismissed — returning primary to {_activePrimaryDevice}.");
-            if (MoveTo(_activePrimaryDevice, "segment 1")) IsSuspended = false;
+            if (MoveTo(_activePrimaryDevice, "the primary selected during Apply")) IsSuspended = false;
         }
     }
 

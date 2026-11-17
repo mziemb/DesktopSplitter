@@ -1,6 +1,4 @@
-using System.Runtime.InteropServices;
 using DesktopSplitter.Models;
-using DesktopSplitter.Services;
 using static DesktopSplitter.Interop.NativeMethods;
 
 namespace DesktopSplitter.Interop;
@@ -15,19 +13,18 @@ public sealed class DisplayArrangeException : Exception
 /// physical monitor, preserving the layout's relative geometry, and sets each to its
 /// configured mode. Also owns primary-display switching, which requires re-basing every
 /// monitor's position so the new primary sits at the virtual-desktop origin.
-/// Uses ChangeDisplaySettingsEx with CDS_NORESET batching + a single final commit.
+/// Validates and commits the complete active DisplayConfig topology.
 /// </summary>
 public static class DisplayArranger
 {
     public sealed record VirtualPlacement(
-        string DeviceName, int Width, int Height, int X, int Y, int Col, int Row, string StableMonitorId = "");
+        string DeviceName, int Width, int Height, int X, int Y, int Col, int Row, string StableMonitorId);
 
     /// <summary>
-    /// A monitor's desired rect in virtual-desktop space. <paramref name="RefreshHz"/> of 0
-    /// means "leave the current refresh rate alone".
+    /// A monitor's desired mode and position in virtual-desktop space.
     /// </summary>
     public sealed record MonitorPlacement(
-        string DeviceName, int Width, int Height, int X, int Y, int RefreshHz, bool IsPrimary, string StableMonitorId = "")
+        string DeviceName, int Width, int Height, int X, int Y, uint Rotation, bool IsPrimary, string StableMonitorId)
     {
         public int Right => X + Width;
         public int Bottom => Y + Height;
@@ -44,7 +41,8 @@ public static class DisplayArranger
         MonitorInfo physical,
         LayoutDefinition layout,
         IReadOnlyList<MonitorInfo> virtualMonitors,
-        IReadOnlyList<(int Width, int Height)> resolutions)
+        IReadOnlyList<(int Width, int Height)> resolutions,
+        IReadOnlyList<MonitorInfo> activePhysical)
     {
         if (virtualMonitors.Count != layout.SegmentCount)
             throw new DisplayArrangeException(
@@ -57,49 +55,60 @@ public static class DisplayArranger
         int[] colWidth = tracks.ColumnWidths;
         int[] rowHeight = tracks.RowHeights;
 
-        int baseX = physical.PositionX + physical.CurrentWidth;
-        int baseY = physical.PositionY;
+        var columnOffsets = new int[colWidth.Length];
+        for (int i = 1; i < columnOffsets.Length; i++)
+            columnOffsets[i] = columnOffsets[i - 1] + colWidth[i - 1];
+        var rowOffsets = new int[rowHeight.Length];
+        for (int i = 1; i < rowOffsets.Length; i++)
+            rowOffsets[i] = rowOffsets[i - 1] + rowHeight[i - 1];
 
-        var placements = new List<VirtualPlacement>(layout.SegmentCount);
-        for (int i = 0; i < layout.SegmentCount; i++)
+        var placements = PlaceToRightOf(physical);
+        if (placements.Any(v => activePhysical.Any(m =>
+                v.X < m.PositionX + m.CurrentWidth && v.X + v.Width > m.PositionX &&
+                v.Y < m.PositionY + m.CurrentHeight && v.Y + v.Height > m.PositionY)))
         {
-            LayoutCell cell = layout.Cells[i];
-            (int w, int h) = resolutions[i];
-
-            int x = baseX;
-            for (int c = 0; c < cell.Col; c++) x += colWidth[c];
-            int y = baseY;
-            for (int r = 0; r < cell.Row; r++) y += rowHeight[r];
-
-            placements.Add(new VirtualPlacement(virtualMonitors[i].DeviceName, w, h, x, y, cell.Col, cell.Row, virtualMonitors[i].StableMonitorId));
+            // The selected physical output may have a neighbor to its right. Anchor the
+            // segment group to the right edge of the physical desktop in that case.
+            var rightmost = activePhysical.MaxBy(m => m.PositionX + m.CurrentWidth)!;
+            placements = PlaceToRightOf(rightmost);
         }
         return placements;
+
+        List<VirtualPlacement> PlaceToRightOf(MonitorInfo anchor)
+        {
+            var result = new List<VirtualPlacement>(layout.SegmentCount);
+            for (int i = 0; i < layout.SegmentCount; i++)
+            {
+                LayoutCell cell = layout.Cells[i];
+                (int width, int height) = resolutions[i];
+                int x = anchor.PositionX + anchor.CurrentWidth + columnOffsets[cell.Col];
+                int y = anchor.PositionY + rowOffsets[cell.Row];
+                MonitorInfo monitor = virtualMonitors[i];
+                result.Add(new VirtualPlacement(monitor.DeviceName, width, height, x, y,
+                    cell.Col, cell.Row, monitor.StableMonitorId));
+            }
+            return result;
+        }
     }
 
     /// <summary>
     /// The whole desktop as it should look once the split is up: every monitor that is not one
     /// of <paramref name="placements"/> keeps its current rect, the virtual monitors take theirs,
     /// and everything is re-based so <paramref name="primaryDevice"/> is primary at the origin.
-    /// Written as ONE batch by <see cref="ApplyLayout"/>, the primary never leaves (0,0) halfway
-    /// through — Windows rejects that, and the rejected half-batch makes every later display
-    /// change fail too. Pure function: no display APIs are called.
+    /// Pure function: no display APIs are called.
     /// </summary>
     public static IReadOnlyList<MonitorPlacement> ComposeLayout(
         IReadOnlyList<MonitorInfo> current,
         IReadOnlyList<VirtualPlacement> placements,
-        int virtualRefreshHz,
         string primaryDevice)
     {
-        var byName = placements.ToDictionary(p => p.DeviceName, StringComparer.OrdinalIgnoreCase);
+        var byIdentity = placements.ToDictionary(p => p.StableMonitorId);
 
-        var layout = current
-            .Select(m => byName.TryGetValue(m.DeviceName, out VirtualPlacement? v)
-                ? new MonitorPlacement(v.DeviceName, v.Width, v.Height, v.X, v.Y, virtualRefreshHz, false, v.StableMonitorId)
-                : new MonitorPlacement(m.DeviceName, m.CurrentWidth, m.CurrentHeight, m.PositionX, m.PositionY, 0, false, m.StableMonitorId))
+        var layout = SnapshotLayout(current)
+            .Select(p => byIdentity.TryGetValue(p.StableMonitorId, out VirtualPlacement? v)
+                ? p with { Width = v.Width, Height = v.Height, X = v.X, Y = v.Y }
+                : p)
             .ToList();
-        layout.AddRange(placements
-            .Where(v => !current.Any(m => string.Equals(m.DeviceName, v.DeviceName, StringComparison.OrdinalIgnoreCase)))
-            .Select(v => new MonitorPlacement(v.DeviceName, v.Width, v.Height, v.X, v.Y, virtualRefreshHz, false, v.StableMonitorId)));
 
         return RebaseToPrimary(layout, primaryDevice);
     }
@@ -141,91 +150,90 @@ public static class DisplayArranger
             .ToList();
     }
 
-    /// <summary>
-    /// Writes a whole desktop layout in one batch. The primary is written first (Windows is
-    /// happiest re-anchoring the origin before the satellites move), then every other monitor,
-    /// then a single commit.
-    /// </summary>
-    public static void ApplyLayout(IReadOnlyList<MonitorPlacement> placements, Action<string>? log = null)
+    public static void ApplyLayout(
+        IReadOnlyList<MonitorInfo> current, IReadOnlyList<MonitorPlacement> placements, Action<string> log)
     {
-        if (placements.Count == 0) return;
+        if (placements.Count(p => p.IsPrimary) != 1 || placements.Any(p => p.IsPrimary != (p.X == 0 && p.Y == 0) || p.Width <= 0 || p.Height <= 0))
+            throw new DisplayArrangeException("The topology must have one primary at (0,0).");
 
-        int primaryCount = placements.Count(p => p.IsPrimary);
-        if (primaryCount != 1)
-            throw new DisplayArrangeException($"Exactly one monitor must be primary, got {primaryCount}.");
+        (var paths, var modes) = DisplayConfig.QueryConfig(QDC_ONLY_ACTIVE_PATHS);
+        log($"QueryDisplayConfig (active paths) returned 0, {paths.Length} paths, {modes.Length} modes.");
+        if (paths.Length != current.Count || placements.Count != current.Count ||
+            paths.Select(p => (p.sourceInfo.adapterId, p.sourceInfo.id)).Distinct().Count() != paths.Length)
+            throw new DisplayArrangeException("Active paths changed or share a source. Use an extended desktop and retry.");
 
-        MonitorPlacement primary = placements.First(p => p.IsPrimary);
-        if (primary.X != 0 || primary.Y != 0)
-            throw new DisplayArrangeException(
-                $"The primary monitor must sit at (0,0); {primary.DeviceName} is at ({primary.X},{primary.Y}).");
-
-        // Resolve every role before the first OS mutation. Also reject clone aliases.
-        var resolved = placements.Select(p => MonitorIdentityStore.Resolve(p.StableMonitorId)).ToList();
-        if (resolved.Select(m => m.DeviceName).Distinct(StringComparer.OrdinalIgnoreCase).Count() != resolved.Count)
-            throw new DisplayArrangeException("Cloned displays share one GDI source; extend the desktop first.");
-        var problems = new List<string>();
-
-        foreach (MonitorPlacement p in placements.OrderByDescending(p => p.IsPrimary))
+        var monitors = current.ToDictionary(m => (m.AdapterIdHigh, m.AdapterIdLow, m.TargetId));
+        var desired = placements.ToDictionary(p => p.DeviceName, StringComparer.OrdinalIgnoreCase);
+        var newModes = new List<DISPLAYCONFIG_MODE_INFO>(modes.Length);
+        foreach (ref var path in paths.AsSpan())
         {
-            uint flags = CDS_UPDATEREGISTRY | CDS_NORESET;
-            if (p.IsPrimary) flags |= CDS_SET_PRIMARY;
+            var target = path.targetInfo;
+            var source = path.sourceInfo;
+            if (!monitors.TryGetValue((target.adapterId.HighPart, target.adapterId.LowPart, target.id), out var monitor) ||
+                !MonitorIdentity.Same(DisplayConfig.GetMonitorDevicePath(path), monitor.MonitorDevicePath) ||
+                !MonitorIdentity.Same(DisplayConfig.GetSourceGdiName(path), monitor.DeviceName) ||
+                !desired.TryGetValue(monitor.DeviceName, out var placement) || placement.StableMonitorId != monitor.StableMonitorId ||
+                monitor.SourceAdapterIdHigh != source.adapterId.HighPart || monitor.SourceAdapterIdLow != source.adapterId.LowPart ||
+                monitor.SourceId != source.id ||
+                source.modeInfoIdx >= modes.Length || modes[source.modeInfoIdx].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+                throw new DisplayArrangeException("Active display paths changed while preparing the topology. Retry.");
 
-            int rc = SetPlacement(p, flags, useRefresh: p.RefreshHz > 1);
-            if (rc != DISP_CHANGE_SUCCESSFUL && p.RefreshHz > 1)
+            var sourceMode = modes[source.modeInfoIdx];
+            var desktop = sourceMode.modeInfo.sourceMode;
+            bool modeChanged = desktop.width != placement.Width || desktop.height != placement.Height ||
+                               target.rotation != placement.Rotation;
+            desktop.position = new POINTL { x = placement.X, y = placement.Y };
+            desktop.width = (uint)placement.Width;
+            desktop.height = (uint)placement.Height;
+            sourceMode.modeInfo.sourceMode = desktop;
+            path.sourceInfo.modeInfoIdx = (uint)newModes.Count;
+            newModes.Add(sourceMode);
+            path.targetInfo.rotation = placement.Rotation;
+            path.targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+            if (!modeChanged && target.modeInfoIdx < modes.Length &&
+                modes[target.modeInfoIdx].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
             {
-                log?.Invoke($"  {p.DeviceName}: rejected at {p.RefreshHz}Hz ({DispChangeToString(rc)}); " +
-                            "retrying without an explicit refresh rate.");
-                rc = SetPlacement(p, flags, useRefresh: false);
+                path.targetInfo.modeInfoIdx = (uint)newModes.Count;
+                newModes.Add(modes[target.modeInfoIdx]);
             }
-
-            if (rc != DISP_CHANGE_SUCCESSFUL)
-                problems.Add($"{p.DeviceName} -> ({p.X},{p.Y}): {DispChangeToString(rc)}");
-            else
-                log?.Invoke($"  {p.DeviceName}: {p.Width}x{p.Height} at ({p.X},{p.Y})" +
-                            (p.IsPrimary ? "   <-- PRIMARY" : string.Empty));
+            log($"  {monitor.StableMonitorId} {placement}, rotation {placement.Rotation}");
         }
 
-        int commit = ChangeDisplaySettingsExApply(null, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero);
-        if (commit != DISP_CHANGE_SUCCESSFUL)
-            problems.Add($"final apply: {DispChangeToString(commit)}");
+        // DisplayConfig uses path order as priority. Keep the other paths in their live order.
+        paths = paths.OrderByDescending(p =>
+        {
+            var position = newModes[(int)p.sourceInfo.modeInfoIdx].modeInfo.sourceMode.position;
+            return position.x == 0 && position.y == 0;
+        }).ToArray();
 
-        if (problems.Count > 0)
-            throw new DisplayArrangeException(
-                "Could not arrange the displays: " + string.Join("; ", problems) + ".");
+        // Supply all active paths and source modes. For a mode change, Windows chooses the
+        // matching target timing. Do not allow Windows to alter the supplied source geometry.
+        DISPLAYCONFIG_MODE_INFO[] supplied = newModes.ToArray();
+        Set(SDC_VALIDATE);
+        Set(SDC_APPLY | SDC_SAVE_TO_DATABASE);
+
+        void Set(uint flags)
+        {
+            int rc = SetDisplayConfig((uint)paths.Length, paths, (uint)supplied.Length, supplied,
+                                      flags | SDC_USE_SUPPLIED_DISPLAY_CONFIG);
+            string operation = flags == SDC_VALIDATE ? "validate" : "apply";
+            log($"SetDisplayConfig ({operation}) returned {rc}.");
+            if (rc != ERROR_SUCCESS)
+                throw new DisplayArrangeException($"SetDisplayConfig ({operation}) failed with error {rc}.");
+        }
     }
 
-    /// <summary>Snapshot of the live desktop as placements (refresh left untouched).</summary>
+    public static MonitorInfo VerifyPrimary(string stableId, IReadOnlyList<MonitorInfo> monitors)
+    {
+        MonitorInfo actual = MonitorIdentityResolver.Resolve(stableId, monitors);
+        if (!actual.IsPrimary || actual.PositionX != 0 || actual.PositionY != 0 || monitors.Count(m => m.IsPrimary) != 1)
+            throw new DisplayArrangeException($"Windows did not confirm primary monitor {stableId} ({actual.DeviceName}) at (0,0).");
+        return actual;
+    }
+
     public static IReadOnlyList<MonitorPlacement> SnapshotLayout(IEnumerable<MonitorInfo> monitors)
         => monitors
             .Select(m => new MonitorPlacement(
-                m.DeviceName, m.CurrentWidth, m.CurrentHeight, m.PositionX, m.PositionY, 0, m.IsPrimary, m.StableMonitorId))
+                m.DeviceName, m.CurrentWidth, m.CurrentHeight, m.PositionX, m.PositionY, m.Rotation, m.IsPrimary, m.StableMonitorId))
             .ToList();
-
-    private static int SetPlacement(MonitorPlacement p, uint flags, bool useRefresh)
-    {
-        string deviceName = MonitorIdentityStore.Resolve(p.StableMonitorId).DeviceName;
-        if (!string.Equals(deviceName, p.DeviceName, StringComparison.OrdinalIgnoreCase))
-            throw new DisplayArrangeException("Topology changed during layout staging; refresh and retry.");
-        var dm = DEVMODE.Create();
-        if (!EnumDisplaySettingsEx(p.DeviceName, ENUM_CURRENT_SETTINGS, ref dm, 0))
-            dm = DEVMODE.Create();
-
-        dm.dmDeviceName = string.Empty;
-        dm.dmFormName = string.Empty;
-        dm.dmSize = (ushort)Marshal.SizeOf<DEVMODE>();
-        dm.dmPelsWidth = (uint)p.Width;
-        dm.dmPelsHeight = (uint)p.Height;
-        dm.dmBitsPerPel = 32;
-        dm.dmPositionX = p.X;
-        dm.dmPositionY = p.Y;
-        dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL;
-
-        if (useRefresh && p.RefreshHz > 1)
-        {
-            dm.dmDisplayFrequency = (uint)p.RefreshHz;
-            dm.dmFields |= DM_DISPLAYFREQUENCY;
-        }
-
-        return ChangeDisplaySettingsEx(p.DeviceName, ref dm, IntPtr.Zero, flags, IntPtr.Zero);
-    }
 }
