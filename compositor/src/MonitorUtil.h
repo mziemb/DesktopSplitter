@@ -10,6 +10,10 @@
 
 namespace ds {
 
+// Connected targets, including hidden/specialized ones; no OS mutations.
+bool ResolveMonitorIdentity(const MonitorIdentity& identity, MonitorObservation& out, bool requireActive = true);
+
+
 struct MonitorEntry {
     std::wstring device;        // MONITORINFOEX.szDevice, e.g. "\\.\DISPLAY1"
     RECT         rect = {};     // full monitor rect, virtual-desktop coords

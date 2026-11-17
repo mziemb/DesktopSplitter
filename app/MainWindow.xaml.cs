@@ -50,6 +50,58 @@ public partial class MainWindow : Window, IHidingUi
         VersionLabel.Text = MainViewModel.VersionText;
     }
 
+    private void IdentityDetails_Click(object sender, RoutedEventArgs e)
+    {
+        MonitorInfo? monitor = _viewModel.SelectedMonitor;
+        if (monitor is null) return;
+        try
+        {
+            var dialog = new Window { Owner = this, Title = "Monitor identity — explicit confirmation",
+                Width = 720, Height = 540, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+            var panel = new StackPanel { Margin = new Thickness(16) };
+            panel.Children.Add(new TextBox { Text = monitor.IdentityDetails, IsReadOnly = true,
+                TextWrapping = TextWrapping.Wrap, Height = 220, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+            panel.Children.Add(new TextBlock { Text = "Confirm only after checking the physical display. Identical devices without reliable serials cannot be distinguished after a port swap.",
+                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0,12,0,12) });
+            var records = MonitorIdentityStore.PhysicalRecords();
+            var choices = new ComboBox();
+            choices.Items.Add("Create a new logical monitor ID");
+            foreach (var record in records) choices.Items.Add(record.StableMonitorId + " — " + record.MonitorDevicePath);
+            choices.SelectedIndex = 0;
+            panel.Children.Add(choices);
+            var settings = SettingsStore.Load();
+            var recovery = new CheckBox { Content = "This selected monitor is the hidden monitor recorded by the legacy settings",
+                IsEnabled = !string.IsNullOrEmpty(settings?.SpecializedDevice) && string.IsNullOrEmpty(settings.SpecializedStableMonitorId),
+                Margin = new Thickness(0,12,0,12) };
+            panel.Children.Add(recovery);
+            var confirm = new Button { Content = "Confirm selected physical monitor", Margin = new Thickness(0,12,0,0) };
+            confirm.Click += (_, _) =>
+            {
+                try
+                {
+                    MonitorIdentityStore.Confirm(monitor, choices.SelectedIndex <= 0 ? null : records[choices.SelectedIndex - 1].StableMonitorId);
+                    if (settings is not null && !settings.HasConfirmedIdentity)
+                    {
+                        MonitorSettingsMigration.ConfirmSelection(settings, monitor.StableMonitorId, recovery.IsChecked == true);
+                        SettingsStore.Save(settings);
+                    }
+                    else if (settings is not null && recovery.IsChecked == true)
+                    {
+                        settings.SpecializedStableMonitorId = monitor.StableMonitorId;
+                        SettingsStore.Save(settings);
+                    }
+                    dialog.Close();
+                    _viewModel.LoadMonitors(announce: true);
+                }
+                catch (Exception ex) { MessageBox.Show(dialog, ex.Message, "Identity conflict"); }
+            };
+            panel.Children.Add(confirm);
+            dialog.Content = panel;
+            dialog.ShowDialog();
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Identity conflict"); }
+    }
+
     // ------------------------------------------------------------------ IHidingUi
 
     public bool Confirm(string title, string message)

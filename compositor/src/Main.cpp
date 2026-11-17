@@ -108,22 +108,31 @@ void ApplyWindowPlacement(App& app) {
 }
 
 void OnDisplayChange(App& app) {
+    if (app.opt.rescue) app.rescuer.OnDisplayChange();
     RECT r = {};
-    if (FindMonitorRect(app.config.physicalDevice, r)) {
+    MonitorObservation resolved;
+    if (ResolveMonitorIdentity(app.config.physicalIdentity, resolved) && FindMonitorRect(resolved.gdiDeviceName, r)) {
+        app.config.physicalDevice = resolved.gdiDeviceName;
         app.physicalRect = r;
-        ApplyWindowPlacement(app);
+        if (!app.specialized && !app.session.IsSuspended()) ApplyWindowPlacement(app);
         const UINT w = static_cast<UINT>(r.right - r.left);
         const UINT h = static_cast<UINT>(r.bottom - r.top);
         app.renderer.RequestResize(w, h);
         DS_LOG(L"display change: physical monitor is now (%ld,%ld)-(%ld,%ld)",
                r.left, r.top, r.right, r.bottom);
     } else {
-        DS_WARN(L"display change: physical device '%s' is gone",
+        if (!app.specialized) ::ShowWindow(app.hwnd, SW_HIDE);
+        app.confiner.Release();
+        DS_WARN(L"display change: physical identity is missing or ambiguous; presentation withheld: '%s'",
                 app.config.physicalDevice.c_str());
+        return;
     }
     // Making a virtual monitor primary re-bases virtual-desktop coordinates, so
     // every cached rect (including negative-coordinate ones) has to be redone.
-    if (app.opt.confine) app.confiner.Refresh();
+    if (app.opt.confine && !app.specialized && !app.session.IsSuspended()) {
+        app.confiner.Configure(app.config.physicalDevice);
+        app.confiner.InstallHook();
+    }
     if (app.opt.rescue) app.rescuer.OnDisplayChange();
 }
 
@@ -140,11 +149,18 @@ void OnSuspendStateChanged(void* context, bool suspended, SuspendReason why) {
         DS_LOG(L"suspend: compositor hidden, cursor clip released (%s)",
                SuspendReasonName(why));
     } else {
+        MonitorObservation resolved;
+        if (!ResolveMonitorIdentity(app->config.physicalIdentity, resolved, !app->specialized)) {
+            DS_WARN(L"resume withheld: physical monitor identity is unresolved");
+            return;
+        }
+        app->config.physicalDevice = resolved.gdiDeviceName;
         if (!app->specialized) {
+            if (!FindMonitorRect(resolved.gdiDeviceName, app->physicalRect)) return;
             ::ShowWindow(app->hwnd, SW_SHOWNOACTIVATE);
             ApplyWindowPlacement(*app);
         }
-        if (app->opt.confine) {
+        if (app->opt.confine && !app->specialized) {
             app->confiner.Configure(app->config.physicalDevice);
             app->confiner.InstallHook();
         }
@@ -357,7 +373,15 @@ int Run(HINSTANCE hinst, const Options& opt) {
         return exitcode::kConfigFailed;
     }
 
-    if (!FindMonitorRect(app.config.physicalDevice, app.physicalRect)) {
+    MonitorObservation resolved;
+    if (!ResolveMonitorIdentity(app.config.physicalIdentity, resolved, !opt.specialized)) {
+        DS_ERR(L"physical stable identity is missing or ambiguous; refusing GDI fallback");
+        return exitcode::kMonitorNotFound;
+    }
+    app.config.physicalDevice = resolved.gdiDeviceName;
+    if (!resolved.active && opt.specialized && app.config.physicalWidth > 0 && app.config.physicalHeight > 0) {
+        app.physicalRect = {0, 0, static_cast<LONG>(app.config.physicalWidth), static_cast<LONG>(app.config.physicalHeight)};
+    } else if (!FindMonitorRect(app.config.physicalDevice, app.physicalRect)) {
         DS_ERR(L"physical monitor '%s' not found", app.config.physicalDevice.c_str());
         if (opt.specialized) {
             DS_ERR(L"  dscomp must be started BEFORE the display is removed from "
@@ -435,8 +459,8 @@ int Run(HINSTANCE hinst, const Options& opt) {
 
     if (app.opt.rescue && !specializedActive) {
         // Segment 1 is the relocation target: config segments[0].
-        app.rescuer.Start(app.config.physicalDevice,
-                          app.config.segments[0].virtualDevice);
+        app.rescuer.Start(app.config.physicalIdentity,
+                          app.config.segments[0].identity);
     } else if (!specializedActive) {
         DS_LOG(L"window rescuer disabled (--no-rescue)");
     }

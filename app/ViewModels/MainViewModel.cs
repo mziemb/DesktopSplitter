@@ -59,6 +59,7 @@ public sealed class MainViewModel : ObservableObject
 
         _selectedLayout = Layouts[0];
 
+        SaveRevertHotkeyCommand = new RelayCommand(SaveRevertHotkey, () => !IsBusy);
         Hiding = new HidingViewModel(() => SelectedMonitor, AppendStatus);
 
         LoadMonitors(announce: false);
@@ -117,10 +118,10 @@ public sealed class MainViewModel : ObservableObject
         AppSettings? settings = SettingsStore.Load();
         if (settings is null) return;
 
-        string activePrimary = settings.AppliedPrimaryDevice;
-        string physicalPrimary = string.IsNullOrEmpty(settings.PreviousPrimaryDevice)
-            ? settings.PhysicalDevice
-            : settings.PreviousPrimaryDevice;
+        string activePrimary = settings.AppliedPrimaryStableMonitorId;
+        string physicalPrimary = string.IsNullOrEmpty(settings.PreviousPrimaryStableMonitorId)
+            ? settings.PhysicalStableMonitorId
+            : settings.PreviousPrimaryStableMonitorId;
 
         _suspensionWatcher ??= new SplitSuspensionWatcher(_progress);
         _suspensionWatcher.Start(activePrimary, physicalPrimary);
@@ -133,6 +134,51 @@ public sealed class MainViewModel : ObservableObject
     private void StopSuspensionWatcher(bool restorePrimary)
     {
         _suspensionWatcher?.Stop(restorePrimary);
+    }
+
+    private readonly RevertRequestQueue _revertRequests = new();
+    private CancellationTokenSource? _applyCancellation;
+    private GlobalRevertHotkey? _globalRevertHotkey;
+    private bool _revertHotkeyEnabled = true;
+    private string _revertHotkeyText = RevertHotkey.DefaultGesture;
+    private string _revertHotkeyStatus = "Not registered.";
+    public bool RevertHotkeyEnabled { get => _revertHotkeyEnabled; set => SetProperty(ref _revertHotkeyEnabled, value); }
+    public string RevertHotkeyText { get => _revertHotkeyText; set => SetProperty(ref _revertHotkeyText, value); }
+    public string RevertHotkeyStatus { get => _revertHotkeyStatus; private set => SetProperty(ref _revertHotkeyStatus, value); }
+    public RelayCommand SaveRevertHotkeyCommand { get; }
+
+    public void AttachRevertHotkey(GlobalRevertHotkey hotkey)
+    {
+        _globalRevertHotkey = hotkey;
+        var settings = SettingsStore.Load();
+        RevertHotkeyEnabled = settings?.GlobalRevertHotkeyEnabled ?? true;
+        RevertHotkeyText = settings?.GlobalRevertHotkey ?? RevertHotkey.DefaultGesture;
+        ConfigureRevertHotkey(persist: false);
+    }
+    private void SaveRevertHotkey() => ConfigureRevertHotkey(persist: true);
+    private void ConfigureRevertHotkey(bool persist)
+    {
+        if (_globalRevertHotkey is null) return;
+        try
+        {
+            RevertHotkey? gesture = RevertHotkeyEnabled ? RevertHotkey.Parse(RevertHotkeyText) : null;
+            _globalRevertHotkey.Configure(gesture, () =>
+            {
+                if (!persist) return;
+                var settings = SettingsStore.Load() ?? new AppSettings();
+                settings.GlobalRevertHotkeyEnabled = RevertHotkeyEnabled;
+                settings.GlobalRevertHotkey = gesture?.ToString() ?? RevertHotkeyText;
+                SettingsStore.Save(settings);
+            });
+            RevertHotkeyStatus = gesture is null ? "Global Revert shortcut disabled." : $"Active globally: {gesture} (also in the tray).";
+            AppendStatus(RevertHotkeyStatus);
+        }
+        catch (Exception ex)
+        {
+            string active = _globalRevertHotkey.ActiveGesture?.ToString() ?? "none";
+            RevertHotkeyStatus = $"{ex.Message} Active shortcut: {active}.";
+            AppendStatus(RevertHotkeyStatus);
+        }
     }
 
     // ------------------------------------------------------------------ preferences
@@ -356,7 +402,8 @@ public sealed class MainViewModel : ObservableObject
 
     public bool CanApply =>
         !IsBusy &&
-        SelectedMonitor is not null &&
+        SelectedMonitor is not null && SelectedMonitor.IsActive &&
+        !string.IsNullOrEmpty(SelectedMonitor.StableMonitorId) &&
         SelectedLayout is not null &&
         Segments.Count == SelectedLayout.SegmentCount &&
         Segments.All(s => s.IsValid);
@@ -405,10 +452,10 @@ public sealed class MainViewModel : ObservableObject
 
     public void LoadMonitors(bool announce)
     {
-        string? previous = SelectedMonitor?.DeviceName;
+        string? previous = SelectedMonitor?.StableMonitorId;
         try
         {
-            IReadOnlyList<MonitorInfo> physical = DisplayConfig.EnumeratePhysical();
+            IReadOnlyList<MonitorInfo> physical = DisplayConfig.EnumerateConnected().Where(m => !m.IsDeskSplitVirtual).ToList();
 
             Monitors.Clear();
             foreach (MonitorInfo m in physical) Monitors.Add(m);
@@ -416,10 +463,10 @@ public sealed class MainViewModel : ObservableObject
             _suppressSegmentRebuild = true;
             try
             {
-                _selectedMonitor = Monitors.FirstOrDefault(
-                                       m => string.Equals(m.DeviceName, previous, StringComparison.OrdinalIgnoreCase))
-                                   ?? Monitors.FirstOrDefault(m => m.IsPrimary)
-                                   ?? Monitors.FirstOrDefault();
+                var candidates = string.IsNullOrEmpty(previous) ? new List<MonitorInfo>() : Monitors.Where(
+                    m => string.Equals(m.StableMonitorId, previous, StringComparison.OrdinalIgnoreCase)).ToList();
+                _selectedMonitor = candidates.Count == 1 ? candidates[0]
+                    : previous is null ? Monitors.FirstOrDefault(m => m.IsPrimary) : null;
             }
             finally { _suppressSegmentRebuild = false; }
 
@@ -428,7 +475,7 @@ public sealed class MainViewModel : ObservableObject
 
             // Preserve the user's edited sizes across a plain rescan of the same monitor.
             bool sameSelection = previous is not null &&
-                                 string.Equals(_selectedMonitor?.DeviceName, previous, StringComparison.OrdinalIgnoreCase);
+                                 string.Equals(_selectedMonitor?.StableMonitorId, previous, StringComparison.OrdinalIgnoreCase);
             bool countMatches = SelectedLayout is not null && Segments.Count == SelectedLayout.SegmentCount;
             RebuildSegments(resetSizes: !(sameSelection && countMatches));
 
@@ -767,22 +814,28 @@ public sealed class MainViewModel : ObservableObject
             Layout = layout,
             Resolutions = resolutions,
             HidePhysicalDisplay = Hiding.IntentOn,
-            SpecializationUi = Hiding.CreateSpecializationUi(() => Monitors.ToList()),
+            SpecializationUi = Hiding.CreateSpecializationUi(() => Monitors.Where(m => m.IsActive).ToList()),
             PromptToConfirm = promptToConfirm,
             Confirmer = _applyConfirmer,
         };
 
+        _applyCancellation = new CancellationTokenSource();
+        CancellationToken applyToken = _applyCancellation.Token;
         IsBusy = true;
         AppendStatus($"--- Applying '{layout.Name}' to {physical.DisplayLabel} ({physical.DeviceName}) ---");
         try
         {
-            ApplyResult result = await Task.Run(() => ApplyService.Apply(request, _progress, CancellationToken.None))
+            ApplyResult result = await Task.Run(() => ApplyService.Apply(request, _progress, applyToken))
                                            .ConfigureAwait(true);
             AppendStatus(result.RolledBack
                 ? $"Change reverted — restored {result.RollbackDescription}."
                 : $"Done. {result.VirtualMonitors.Count} virtual monitor(s) active.");
 
             if (!result.RolledBack) StartSuspensionWatcher();
+        }
+        catch (OperationCanceledException)
+        {
+            AppendStatus("Apply interrupted by a Revert request.");
         }
         catch (ApplyException ex)
         {
@@ -810,26 +863,43 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
+            _applyCancellation.Dispose();
+            _applyCancellation = null;
             IsBusy = false;
-            LoadMonitors(announce: false);
-            RefreshDriverStatus();
-            RefreshCompositorStatus();
-            _ = Hiding.RefreshAsync();
+            if (_revertRequests.TakePending())
+            {
+                await RevertAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                LoadMonitors(announce: false);
+                RefreshDriverStatus();
+                RefreshCompositorStatus();
+                _ = Hiding.RefreshAsync();
+            }
         }
     }
 
     public async Task RevertAsync()
     {
+        RevertRequestDisposition disposition = _revertRequests.Request(IsBusy);
+        if (disposition == RevertRequestDisposition.AlreadyReverting) return;
+        if (disposition == RevertRequestDisposition.Queued)
+        {
+            AppendStatus("Revert queued; waiting for the current Apply operation to release the display pipeline.");
+            _applyCancellation?.Cancel();
+            return;
+        }
         IsBusy = true;
         AppendStatus("--- Reverting ---");
 
         // Drop any pending suspend state first: Revert restores primary itself, and a watcher
         // still reacting to events would fight it.
-        StopSuspensionWatcher(restorePrimary: false);
-
         try
         {
-            await Task.Run(() => ApplyService.Revert(_progress, CancellationToken.None)).ConfigureAwait(true);
+            StopSuspensionWatcher(restorePrimary: false);
+            var recoveryUi = Hiding.CreateSpecializationUi(() => Monitors.Where(m => m.IsActive).ToList());
+            await Task.Run(() => ApplyService.Revert(_progress, CancellationToken.None, recoveryUi)).ConfigureAwait(true);
         }
         catch (ApplyException ex)
         {
@@ -841,6 +911,7 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
+            _revertRequests.CompleteRevert();
             IsBusy = false;
             LoadMonitors(announce: false);
             RefreshDriverStatus();
@@ -924,6 +995,7 @@ public sealed class MainViewModel : ObservableObject
     private void RaiseCommandStates()
     {
         OnPropertyChanged(nameof(CanApply));
+        SaveRevertHotkeyCommand?.RaiseCanExecuteChanged();
         ApplyCommand.RaiseCanExecuteChanged();
         RevertCommand.RaiseCanExecuteChanged();
         RefreshMonitorsCommand.RaiseCanExecuteChanged();
@@ -938,11 +1010,14 @@ public sealed class MainViewModel : ObservableObject
     {
         if (settings is null) return false;
 
-        MonitorInfo? monitor = Monitors.FirstOrDefault(
-                                   m => string.Equals(m.DeviceName, settings.PhysicalDevice, StringComparison.OrdinalIgnoreCase))
-                               ?? Monitors.FirstOrDefault(
-                                   m => string.Equals(m.FriendlyName, settings.PhysicalFriendlyName, StringComparison.OrdinalIgnoreCase));
-        if (monitor is null) return false;
+        if (!settings.HasConfirmedIdentity)
+        {
+            AppendStatus("Legacy monitor selection is unverified. Select the physical monitor and confirm Identity details before Apply. Automatic Apply is disabled.");
+            return false;
+        }
+        var matches = Monitors.Where(m => m.StableMonitorId == settings.PhysicalStableMonitorId).ToList();
+        if (matches.Count != 1) return false;
+        MonitorInfo monitor = matches[0];
 
         _suppressSegmentRebuild = true;
         try

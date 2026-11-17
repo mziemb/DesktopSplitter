@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../app/Models/RevertHotkey.cs" Link="RevertHotkey.cs"/>
+    <Compile Include="../../app/Services/HotkeyRegistration.cs" Link="HotkeyRegistration.cs"/>
+    <Compile Include="../../app/Services/RevertRequestQueue.cs" Link="RevertRequestQueue.cs"/>
+    <Compile Include="../../app/Models/MonitorIdentityResolver.cs" Link="MonitorIdentityResolver.cs"/>
+    <Compile Include="../../app/Models/MonitorInfo.cs" Link="MonitorInfo.cs"/>
+    <Compile Include="../../app/Interop/EdidReader.cs" Link="EdidReader.cs"/>
+    <Compile Include="../../app/Models/MonitorIdentity.cs" Link="MonitorIdentity.cs"/>
+    <Compile Include="../../app/Models/AppSettings.cs" Link="AppSettings.cs"/>
+    <Compile Include="../../app/Models/LayoutDefinition.cs" Link="LayoutDefinition.cs"/>
+    <Compile Include="../../app/Models/LayoutGeometry.cs" Link="LayoutGeometry.cs"/>
+    <Compile Include="../../app/Models/PixelRect.cs" Link="PixelRect.cs"/>
+    <Compile Include="../../app/Services/MonitorSettingsMigration.cs" Link="MonitorSettingsMigration.cs"/>
+    <Compile Include="../../app/Services/SettingsStore.cs" Link="SettingsStore.cs"/>
+  </ItemGroup>
+</Project>

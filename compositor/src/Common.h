@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <MonitorIdentityMatch.h>
 
 namespace ds {
 
@@ -25,6 +26,7 @@ struct PhysRect {
 };
 
 struct SegmentConfig {
+    MonitorIdentity identity;
     std::wstring virtualDevice;   // e.g. L"\\\\.\\DISPLAY3"
     uint32_t     width = 0;       // expected capture width  (informational)
     uint32_t     height = 0;      // expected capture height (informational)
@@ -32,6 +34,8 @@ struct SegmentConfig {
 };
 
 struct AppConfig {
+    MonitorIdentity physicalIdentity;
+    uint32_t physicalWidth = 0, physicalHeight = 0;
     std::wstring               physicalDevice;          // e.g. L"\\\\.\\DISPLAY1"
     uint32_t                   refreshMillihertz = 60000;
     std::vector<SegmentConfig> segments;
