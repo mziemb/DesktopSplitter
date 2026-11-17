@@ -5,6 +5,13 @@ namespace DesktopSplitter.Models;
 /// <summary>%APPDATA%\DesktopSplitter\settings.json — last applied UI state.</summary>
 public sealed class AppSettings
 {
+    public int IdentitySchemaVersion { get; set; }
+    public string PhysicalStableMonitorId { get; set; } = string.Empty;
+    public string PreviousPrimaryStableMonitorId { get; set; } = string.Empty;
+    public string AppliedPrimaryStableMonitorId { get; set; } = string.Empty;
+    public string SpecializedStableMonitorId { get; set; } = string.Empty;
+    public bool HasConfirmedIdentity => IdentitySchemaVersion == 1 && PhysicalStableMonitorId.Length > 0;
+
     [JsonPropertyName("physicalDevice")]
     public string PhysicalDevice { get; set; } = string.Empty;
 

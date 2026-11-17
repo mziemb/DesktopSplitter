@@ -117,10 +117,10 @@ public sealed class MainViewModel : ObservableObject
         AppSettings? settings = SettingsStore.Load();
         if (settings is null) return;
 
-        string activePrimary = settings.AppliedPrimaryDevice;
-        string physicalPrimary = string.IsNullOrEmpty(settings.PreviousPrimaryDevice)
-            ? settings.PhysicalDevice
-            : settings.PreviousPrimaryDevice;
+        string activePrimary = settings.AppliedPrimaryStableMonitorId;
+        string physicalPrimary = string.IsNullOrEmpty(settings.PreviousPrimaryStableMonitorId)
+            ? settings.PhysicalStableMonitorId
+            : settings.PreviousPrimaryStableMonitorId;
 
         _suspensionWatcher ??= new SplitSuspensionWatcher(_progress);
         _suspensionWatcher.Start(activePrimary, physicalPrimary);
@@ -356,7 +356,8 @@ public sealed class MainViewModel : ObservableObject
 
     public bool CanApply =>
         !IsBusy &&
-        SelectedMonitor is not null &&
+        SelectedMonitor is not null && SelectedMonitor.IsActive &&
+        !string.IsNullOrEmpty(SelectedMonitor.StableMonitorId) &&
         SelectedLayout is not null &&
         Segments.Count == SelectedLayout.SegmentCount &&
         Segments.All(s => s.IsValid);
@@ -405,10 +406,10 @@ public sealed class MainViewModel : ObservableObject
 
     public void LoadMonitors(bool announce)
     {
-        string? previous = SelectedMonitor?.DeviceName;
+        string? previous = SelectedMonitor?.StableMonitorId;
         try
         {
-            IReadOnlyList<MonitorInfo> physical = DisplayConfig.EnumeratePhysical();
+            IReadOnlyList<MonitorInfo> physical = DisplayConfig.EnumerateConnected().Where(m => !m.IsDeskSplitVirtual).ToList();
 
             Monitors.Clear();
             foreach (MonitorInfo m in physical) Monitors.Add(m);
@@ -416,10 +417,10 @@ public sealed class MainViewModel : ObservableObject
             _suppressSegmentRebuild = true;
             try
             {
-                _selectedMonitor = Monitors.FirstOrDefault(
-                                       m => string.Equals(m.DeviceName, previous, StringComparison.OrdinalIgnoreCase))
-                                   ?? Monitors.FirstOrDefault(m => m.IsPrimary)
-                                   ?? Monitors.FirstOrDefault();
+                var candidates = string.IsNullOrEmpty(previous) ? new List<MonitorInfo>() : Monitors.Where(
+                    m => string.Equals(m.StableMonitorId, previous, StringComparison.OrdinalIgnoreCase)).ToList();
+                _selectedMonitor = candidates.Count == 1 ? candidates[0]
+                    : previous is null ? Monitors.FirstOrDefault(m => m.IsPrimary) : null;
             }
             finally { _suppressSegmentRebuild = false; }
 
@@ -428,7 +429,7 @@ public sealed class MainViewModel : ObservableObject
 
             // Preserve the user's edited sizes across a plain rescan of the same monitor.
             bool sameSelection = previous is not null &&
-                                 string.Equals(_selectedMonitor?.DeviceName, previous, StringComparison.OrdinalIgnoreCase);
+                                 string.Equals(_selectedMonitor?.StableMonitorId, previous, StringComparison.OrdinalIgnoreCase);
             bool countMatches = SelectedLayout is not null && Segments.Count == SelectedLayout.SegmentCount;
             RebuildSegments(resetSizes: !(sameSelection && countMatches));
 
@@ -938,11 +939,14 @@ public sealed class MainViewModel : ObservableObject
     {
         if (settings is null) return false;
 
-        MonitorInfo? monitor = Monitors.FirstOrDefault(
-                                   m => string.Equals(m.DeviceName, settings.PhysicalDevice, StringComparison.OrdinalIgnoreCase))
-                               ?? Monitors.FirstOrDefault(
-                                   m => string.Equals(m.FriendlyName, settings.PhysicalFriendlyName, StringComparison.OrdinalIgnoreCase));
-        if (monitor is null) return false;
+        if (!settings.HasConfirmedIdentity)
+        {
+            AppendStatus("Legacy monitor selection is unverified. Select the physical monitor and confirm Identity details before Apply. Automatic Apply is disabled.");
+            return false;
+        }
+        var matches = Monitors.Where(m => m.StableMonitorId == settings.PhysicalStableMonitorId).ToList();
+        if (matches.Count != 1) return false;
+        MonitorInfo monitor = matches[0];
 
         _suppressSegmentRebuild = true;
         try

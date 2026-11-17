@@ -208,6 +208,10 @@
                             Command="{Binding RefreshMonitorsCommand}"/>
                 </Grid>
 
+                <Button Content="Identity details / Confirm monitor…" Click="IdentityDetails_Click"
+                        IsEnabled="{Binding IsIdle}" HorizontalAlignment="Left" Margin="0,8,0,0"/>
+                <TextBlock Text="{Binding SelectedMonitor.IdentityConflict}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+
                 <!-- Current mode + max refresh readout -->
                 <StackPanel Orientation="Horizontal" Margin="0,8,0,16">
                     <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}"

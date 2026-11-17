@@ -136,15 +136,12 @@ public static class DriverClient
             ref guid, IntPtr.Zero, buffer, len, CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
         if (cr != CR_SUCCESS) return false;
 
-        foreach (string s in SplitMultiSz(buffer))
-        {
-            if (!string.IsNullOrWhiteSpace(s))
-            {
-                devicePath = s;
-                return true;
-            }
-        }
-        return false;
+        var devices = SplitMultiSz(buffer).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+        if (devices.Count > 1)
+            throw new DriverIoException("Multiple DesktopSplitter control adapters are connected; explicit adapter selection is required. No configuration was sent.");
+        if (devices.Count == 0) return false;
+        devicePath = devices[0];
+        return true;
     }
 
     /// <summary>Sends IOCTL_DESKSPLIT_SET_CONFIG.</summary>

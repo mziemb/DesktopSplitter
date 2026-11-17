@@ -1,4 +1,5 @@
 #include "Capture.h"
+#include "MonitorUtil.h"
 #include "Log.h"
 
 #include <d3d11.h>
@@ -198,6 +199,12 @@ bool SegmentCapture::InitDuplication() {
     ComPtr<IDXGIOutput1>  output1;
     LUID                  outLuid = {};
 
+    MonitorObservation resolved;
+    if (!ResolveMonitorIdentity(m_cfg.identity, resolved)) {
+        DS_WARN(L"segment %zu: stable identity missing or ambiguous; capture withheld", m_index);
+        return false;
+    }
+    m_cfg.virtualDevice = resolved.gdiDeviceName;
     if (!ResolveOutput(m_cfg.virtualDevice, adapter, output1, outLuid)) {
         DS_VERB(L"segment %zu: output '%s' not found yet", m_index,
                 m_cfg.virtualDevice.c_str());

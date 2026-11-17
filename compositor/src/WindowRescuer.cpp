@@ -95,12 +95,12 @@ WindowRescuer::~WindowRescuer() {
     Stop();
 }
 
-bool WindowRescuer::Start(const std::wstring& coveredDevice,
-                          const std::wstring& targetDevice) {
+bool WindowRescuer::Start(const MonitorIdentity& coveredIdentity,
+                          const MonitorIdentity& targetIdentity) {
     if (m_thread.joinable()) return true;
 
-    m_coveredDevice = coveredDevice;
-    m_targetDevice = targetDevice;
+    m_coveredIdentity = coveredIdentity;
+    m_targetIdentity = targetIdentity;
     m_ownPid = ::GetCurrentProcessId();
     m_ready = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_instance = this;
@@ -222,6 +222,13 @@ bool WindowRescuer::RefreshRects() {
         return true;
     }
 
+    MonitorObservation covered, target;
+    if (!ResolveMonitorIdentity(m_coveredIdentity, covered) || !ResolveMonitorIdentity(m_targetIdentity, target)) {
+        m_rectsValid = false;
+        return false;
+    }
+    m_coveredDevice = covered.gdiDeviceName;
+    m_targetDevice = target.gdiDeviceName;
     std::vector<MonitorEntry> all;
     EnumerateMonitors(all);
 
