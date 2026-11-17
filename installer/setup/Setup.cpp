@@ -154,8 +154,8 @@ namespace
 
             if (g_Quiet)
             {
-                Out(L"    /quiet specified - proceeding without asking.\n");
-                return true;
+                Out(L"    /quiet does not authorize certificate-store changes. Use interactive mode to review and explicitly consent.\n");
+                return false;
             }
 
             for (;;)
@@ -201,6 +201,7 @@ namespace
             L"  /keeptemp     keep the unpacked driver package for diagnostics\n"
             L"\n"
             L"Exit codes:\n"
+            L"   3010 restart required; run /verify-installed after reboot\n"
             L"   0 success                    7 certificate installation failed\n"
             L"   1 bad command line           8 driver package installation failed\n"
             L"   2 not elevated               9 device node creation failed\n"
@@ -337,7 +338,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR, 
         return ExitUsage;
     }
 
-    bool WantUninstall = false, WantVerify = false, WantHelp = false, WantSelfTest = false;
+    bool WantUninstall = false, WantVerify = false, WantHelp = false, WantSelfTest = false, WantInstalledVerify = false;
     bool RemoveCert = false, KeepTemp = false, NoShortcut = false, HideDisplay = false;
     const wchar_t* DirOverride = nullptr;
 
@@ -358,6 +359,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR, 
         else if (!_wcsicmp(Arg, L"keeptemp"))                                        KeepTemp = true;
         else if (!_wcsicmp(Arg, L"noshortcut"))                                      NoShortcut = true;
         else if (!_wcsicmp(Arg, L"hidedisplay"))                                     HideDisplay = true;
+        else if (!_wcsicmp(Arg, L"verify-installed"))                                WantInstalledVerify = true;
         else if (!_wcsicmp(Arg, L"selftest"))                                        WantSelfTest = true;
         else if (!_wcsicmp(Arg, L"dir") && Index + 1 < ArgCount)                     DirOverride = Args[++Index];
         else
@@ -418,6 +420,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR, 
         return ExitNotElevated;
     }
 
+    if (WantInstalledVerify)
+    {
+        EnsureConsole(); ConsoleSink sink;
+        return RunInstalledVerification(&sink);
+    }
+
     if (g_Quiet)
     {
         EnsureConsole();
@@ -453,7 +461,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR, 
             Result = RunInstallSequence(&Options, &Sink);
         }
 
-        Out(L"\n%s (exit %d)\n", Result == ExitSuccess ? L"Completed." : L"Failed.", Result);
+        Out(L"\n%s (exit %d)\n", Result == ExitSuccess ? L"Verified ready." : Result == ExitRestartRequired ? L"Restart required; verification pending." : L"Failed / incomplete.", Result);
         return Result;
     }
 

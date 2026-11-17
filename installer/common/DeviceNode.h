@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
+#include <vector>
 
 namespace DeskSplit
 {
@@ -22,8 +23,12 @@ namespace DeskSplit
         DEVINST DevInst;
         ULONG   Status;         // CM_Get_DevNode_Status output
         ULONG   Problem;        // CM_PROB_* (0 when healthy)
+        ULONG   StatusResult;   // raw CONFIGRET (separate namespace from PnP/Win32)
         bool    HasStatus;      // false if CM_Get_DevNode_Status failed
     };
+
+    // Checked enumeration: errors remain errors; includes instance ID and raw CM status.
+    DWORD ListDeviceNodes(const wchar_t* HardwareId, bool PresentOnly, std::vector<DeviceNodeInfo>& Nodes);
 
     // Number of device nodes under the ROOT enumerator carrying HardwareId.
     // Returns -1 if the enumeration itself failed.

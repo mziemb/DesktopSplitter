@@ -2,6 +2,7 @@
 
 #include <setupapi.h>
 #include <strsafe.h>
+#include <cstring>
 
 #pragma comment(lib, "setupapi.lib")
 
@@ -11,6 +12,30 @@ namespace
     // installer keeps working (via the pnputil fallback) on any SKU where the
     // export is unavailable, instead of failing to start at all.
     typedef BOOL(WINAPI* PFN_DiInstallDriverW)(HWND, LPCWSTR, DWORD, PBOOL);
+
+    bool InfIsOurs(HINF inf, const wchar_t* catalogName)
+    {
+        wchar_t catalog[MAX_PATH] = {}, classGuid[64] = {};
+        if (!SetupGetLineTextW(nullptr, inf, L"Version", L"CatalogFile", catalog, ARRAYSIZE(catalog), nullptr) ||
+            _wcsicmp(catalog, catalogName) ||
+            !SetupGetLineTextW(nullptr, inf, L"Version", L"ClassGUID", classGuid, ARRAYSIZE(classGuid), nullptr) ||
+            _wcsicmp(classGuid, L"{4D36E968-E325-11CE-BFC1-08002BE10318}")) return false;
+        for (UINT index = 0;; ++index) {
+            wchar_t section[256] = {};
+            if (!SetupEnumInfSectionsW(inf, index, section, ARRAYSIZE(section), nullptr)) break;
+            INFCONTEXT context = {};
+            if (!SetupFindFirstLineW(inf, section, nullptr, &context)) continue;
+            do {
+                DWORD fields = SetupGetFieldCount(&context);
+                for (DWORD field = 2; field <= fields; ++field) {
+                    wchar_t id[256] = {};
+                    if (SetupGetStringFieldW(&context, field, id, ARRAYSIZE(id), nullptr) &&
+                        _wcsicmp(id, L"Root\\DesktopSplitterVdd") == 0) return true;
+                }
+            } while (SetupFindNextLine(&context, &context));
+        }
+        return false;
+    }
 
     DWORD RunProcessAndWait(const wchar_t* ApplicationPath, wchar_t* MutableCommandLine, DWORD* pExitCode)
     {
@@ -34,19 +59,27 @@ namespace
             return GetLastError();
         }
 
-        WaitForSingleObject(ProcessInfo.hProcess, INFINITE);
-
+        DWORD wait = WaitForSingleObject(ProcessInfo.hProcess, 120000);
+        if (wait != WAIT_OBJECT_0) {
+            DWORD error = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+            TerminateProcess(ProcessInfo.hProcess, error); // Only our own timed-out pnputil child.
+            WaitForSingleObject(ProcessInfo.hProcess, 3000);
+            CloseHandle(ProcessInfo.hThread); CloseHandle(ProcessInfo.hProcess);
+            return error;
+        }
         DWORD ExitCode = 0;
         if (!GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode))
         {
-            ExitCode = static_cast<DWORD>(-1);
+            DWORD error = GetLastError();
+            CloseHandle(ProcessInfo.hThread); CloseHandle(ProcessInfo.hProcess);
+            return error;
         }
 
         CloseHandle(ProcessInfo.hThread);
         CloseHandle(ProcessInfo.hProcess);
 
         *pExitCode = ExitCode;
-        return ERROR_SUCCESS;
+        return ExitCode == STILL_ACTIVE ? ERROR_TIMEOUT : ERROR_SUCCESS;
     }
 
     DWORD RunPnpUtilAddDriver(const wchar_t* InfPath, bool* pRebootRequired)
@@ -100,6 +133,31 @@ namespace
 
 namespace DeskSplit
 {
+    DWORD StageExactDriverPackage(const wchar_t* InfPath, std::wstring& PublishedName)
+    {
+        wchar_t destination[MAX_PATH] = {};
+        if (!SetupCopyOEMInfW(InfPath, nullptr, SPOST_PATH, 0, destination, ARRAYSIZE(destination), nullptr, nullptr)) return GetLastError();
+        const wchar_t* name = wcsrchr(destination, L'\\');
+        PublishedName = name ? name + 1 : destination;
+        if (PublishedName.empty()) return ERROR_INVALID_DATA;
+        // Verify the staged bytes, not just that some catalog with the same basename exists.
+        HANDLE original = CreateFileW(InfPath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        HANDLE staged = CreateFileW(destination, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (original == INVALID_HANDLE_VALUE || staged == INVALID_HANDLE_VALUE) {
+            DWORD error = GetLastError();
+            if (original != INVALID_HANDLE_VALUE) CloseHandle(original);
+            if (staged != INVALID_HANDLE_VALUE) CloseHandle(staged);
+            return error;
+        }
+        BYTE a[4096], b[4096]; DWORD ac = 0, bc = 0, error = ERROR_SUCCESS;
+        for (;;) {
+            if (!ReadFile(original, a, sizeof(a), &ac, nullptr) || !ReadFile(staged, b, sizeof(b), &bc, nullptr)) { error = GetLastError(); break; }
+            if (ac != bc || memcmp(a, b, ac)) { error = ERROR_CRC; break; }
+            if (!ac) break;
+        }
+        CloseHandle(original); CloseHandle(staged); return error;
+    }
+
     _Use_decl_annotations_
     DWORD InstallDriverPackage(
         const wchar_t* InfPath,
@@ -141,12 +199,6 @@ namespace DeskSplit
                     case ERROR_NO_SUCH_DEVINST:
                         // Package staged; no present device matched it yet. The
                         // device node is created in the next step.
-                        NeedFallback = false;
-                        break;
-
-                    case ERROR_DI_DO_DEFAULT:
-                        // The same or a newer package is already installed.
-                        *pAlreadyCurrent = true;
                         NeedFallback = false;
                         break;
 
@@ -209,7 +261,7 @@ namespace DeskSplit
             }
             if (pList->Count >= OemInfList::kMax)
             {
-                break;
+                FindClose(Find); SetLastError(ERROR_MORE_DATA); return false;
             }
 
             wchar_t FullPath[MAX_PATH] = {};
@@ -229,7 +281,7 @@ namespace DeskSplit
             DWORD Required = 0;
             if (SetupGetLineTextW(nullptr, Inf, L"Version", L"CatalogFile", Catalog,
                                   static_cast<DWORD>(ARRAYSIZE(Catalog)), &Required) &&
-                _wcsicmp(Catalog, CatalogFileName) == 0)
+                _wcsicmp(Catalog, CatalogFileName) == 0 && InfIsOurs(Inf, CatalogFileName))
             {
                 const size_t Index = pList->Count;
                 StringCchCopyW(pList->Names[Index], MAX_PATH, FindData.cFileName);
@@ -248,7 +300,10 @@ namespace DeskSplit
             SetupCloseInfFile(Inf);
         } while (FindNextFileW(Find, &FindData));
 
+        DWORD enumeration = GetLastError();
         FindClose(Find);
+        if (enumeration != ERROR_NO_MORE_FILES) { SetLastError(enumeration); return false; }
+        SetLastError(pList->Count ? ERROR_SUCCESS : ERROR_NOT_FOUND);
         return pList->Count > 0;
     }
 
@@ -362,7 +417,7 @@ namespace DeskSplit
                     static_cast<DWORD>(ARRAYSIZE(Catalog)),
                     &Required))
             {
-                if (_wcsicmp(Catalog, CatalogFileName) == 0)
+                if (_wcsicmp(Catalog, CatalogFileName) == 0 && InfIsOurs(Inf, CatalogFileName))
                 {
                     StringCchCopyW(OemName, NameChars, FindData.cFileName);
                     Found = true;

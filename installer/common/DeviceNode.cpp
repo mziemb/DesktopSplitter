@@ -46,76 +46,63 @@ namespace
 
 namespace DeskSplit
 {
-    int CountDeviceNodes(const wchar_t* HardwareId)
+    DWORD ListDeviceNodes(const wchar_t* HardwareId, bool PresentOnly, std::vector<DeviceNodeInfo>& Nodes)
     {
-        HDEVINFO DevInfo = SetupDiGetClassDevsW(nullptr, L"ROOT", nullptr, DIGCF_ALLCLASSES);
-        if (DevInfo == INVALID_HANDLE_VALUE)
-        {
-            return -1;
-        }
-
-        int Matches = 0;
-        SP_DEVINFO_DATA DevInfoData = {};
-        DevInfoData.cbSize = sizeof(DevInfoData);
-
-        for (DWORD Index = 0; SetupDiEnumDeviceInfo(DevInfo, Index, &DevInfoData); ++Index)
-        {
-            if (HasHardwareId(DevInfo, &DevInfoData, HardwareId))
-            {
-                ++Matches;
+        Nodes.clear();
+        HDEVINFO set = SetupDiGetClassDevsW(nullptr, L"ROOT", nullptr, DIGCF_ALLCLASSES | (PresentOnly ? DIGCF_PRESENT : 0));
+        if (set == INVALID_HANDLE_VALUE) return GetLastError();
+        DWORD result = ERROR_SUCCESS;
+        for (DWORD index = 0;; ++index) {
+            SP_DEVINFO_DATA data = {}; data.cbSize = sizeof(data);
+            if (!SetupDiEnumDeviceInfo(set, index, &data)) {
+                DWORD error = GetLastError(); if (error != ERROR_NO_MORE_ITEMS) result = error;
+                break;
             }
+            DWORD size = 0, type = 0;
+            if (!SetupDiGetDeviceRegistryPropertyW(set, &data, SPDRP_HARDWAREID, &type, nullptr, 0, &size)) {
+                DWORD error = GetLastError();
+                if (error == ERROR_INVALID_DATA) continue;
+                if (error != ERROR_INSUFFICIENT_BUFFER) { result = error; break; }
+            }
+            if (size < 2 * sizeof(wchar_t) || size > 65536 || size % sizeof(wchar_t)) { result = ERROR_INVALID_DATA; break; }
+            std::vector<wchar_t> ids(size / sizeof(wchar_t) + 2, 0);
+            if (!SetupDiGetDeviceRegistryPropertyW(set, &data, SPDRP_HARDWAREID, &type,
+                    reinterpret_cast<BYTE*>(ids.data()), size, nullptr)) { result = GetLastError(); break; }
+            if (type != REG_MULTI_SZ) { result = ERROR_INVALID_DATA; break; }
+            bool match = false;
+            for (const wchar_t* id = ids.data(); *id; id += wcslen(id) + 1)
+                if (_wcsicmp(id, HardwareId) == 0) match = true;
+            if (!match) continue;
+            if (!IsEqualGUID(data.ClassGuid, GUID_DEVCLASS_DISPLAY)) { result = ERROR_INVALID_DATA; break; }
+            DeviceNodeInfo info = {};
+            if (!SetupDiGetDeviceInstanceIdW(set, &data, info.InstanceId, ARRAYSIZE(info.InstanceId), nullptr)) {
+                result = GetLastError(); break;
+            }
+            info.DevInst = data.DevInst;
+            info.StatusResult = CM_Get_DevNode_Status(&info.Status, &info.Problem, info.DevInst, 0);
+            info.HasStatus = info.StatusResult == CR_SUCCESS;
+            Nodes.push_back(info);
         }
-
-        SetupDiDestroyDeviceInfoList(DevInfo);
-        return Matches;
+        SetupDiDestroyDeviceInfoList(set);
+        return result;
     }
 
-    _Use_decl_annotations_
+    int CountDeviceNodes(const wchar_t* HardwareId)
+    {
+        std::vector<DeviceNodeInfo> nodes;
+        DWORD error = ListDeviceNodes(HardwareId, false, nodes);
+        if (error) { SetLastError(error); return -1; }
+        return static_cast<int>(nodes.size());
+    }
+
     bool FindDeviceNode(const wchar_t* HardwareId, DeviceNodeInfo* pInfo)
     {
         ZeroMemory(pInfo, sizeof(*pInfo));
-
-        HDEVINFO DevInfo = SetupDiGetClassDevsW(nullptr, L"ROOT", nullptr, DIGCF_ALLCLASSES);
-        if (DevInfo == INVALID_HANDLE_VALUE)
-        {
-            return false;
-        }
-
-        bool Found = false;
-        SP_DEVINFO_DATA DevInfoData = {};
-        DevInfoData.cbSize = sizeof(DevInfoData);
-
-        for (DWORD Index = 0; SetupDiEnumDeviceInfo(DevInfo, Index, &DevInfoData); ++Index)
-        {
-            if (!HasHardwareId(DevInfo, &DevInfoData, HardwareId))
-            {
-                continue;
-            }
-
-            SetupDiGetDeviceInstanceIdW(
-                DevInfo,
-                &DevInfoData,
-                pInfo->InstanceId,
-                static_cast<DWORD>(ARRAYSIZE(pInfo->InstanceId)),
-                nullptr);
-
-            pInfo->DevInst = DevInfoData.DevInst;
-
-            ULONG Status = 0;
-            ULONG Problem = 0;
-            if (CM_Get_DevNode_Status(&Status, &Problem, DevInfoData.DevInst, 0) == CR_SUCCESS)
-            {
-                pInfo->Status = Status;
-                pInfo->Problem = Problem;
-                pInfo->HasStatus = true;
-            }
-
-            Found = true;
-            break;
-        }
-
-        SetupDiDestroyDeviceInfoList(DevInfo);
-        return Found;
+        std::vector<DeviceNodeInfo> nodes;
+        DWORD error = ListDeviceNodes(HardwareId, true, nodes);
+        if (error || nodes.size() != 1) { SetLastError(error ? error : nodes.empty() ? ERROR_NOT_FOUND : ERROR_DUP_NAME); return false; }
+        *pInfo = nodes[0];
+        return true;
     }
 
     _Use_decl_annotations_
@@ -133,8 +120,12 @@ namespace DeskSplit
         *pRebootRequired = false;
 
         const int Existing = CountDeviceNodes(HardwareId);
-        if (Existing > 0)
+        if (Existing < 0) return GetLastError();
+        if (Existing > 1) return ERROR_DUP_NAME;
+        if (Existing == 1)
         {
+            DeviceNodeInfo existing = {};
+            if (!FindDeviceNode(HardwareId, &existing)) return GetLastError();
             *pAlreadyExisted = true;
             return ERROR_SUCCESS;
         }

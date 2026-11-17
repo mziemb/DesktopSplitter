@@ -3,6 +3,7 @@
 #pragma once
 
 #include <windows.h>
+#include <string>
 
 namespace DeskSplit
 {
@@ -11,6 +12,9 @@ namespace DeskSplit
         DiInstallDriver,    // newdev.dll!DiInstallDriverW
         PnpUtil             // pnputil.exe /add-driver <inf> /install
     };
+
+    // Stages this exact INF and returns its published OEM filename; old packages are retained.
+    DWORD StageExactDriverPackage(const wchar_t* InfPath, std::wstring& PublishedName);
 
     // Installs (stages + binds) the driver package identified by InfPath.
     // Returns a Win32 error code; ERROR_SUCCESS on success.

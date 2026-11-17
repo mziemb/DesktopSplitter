@@ -1,4 +1,9 @@
 #include "InstallEngine.h"
+#include "InstallPolicy.h"
+#include "InstallLog.h"
+#include "InstalledVerification.h"
+#include <newdev.h>
+#include <shlobj.h>
 
 #include "Payload.h"
 #include "DriverPackage.h"
@@ -58,26 +63,6 @@ namespace
         wchar_t Message[512] = {};
         DeskSplit::FormatWin32Error(Error, Message, ARRAYSIZE(Message));
         Errorf(pSink, L"%s failed: %s (0x%08X)", What, Message, Error);
-    }
-
-    bool WaitForHealthyDeviceNode(DeskSplit::DeviceNodeInfo* pInfo, DWORD TimeoutMs)
-    {
-        const ULONGLONG Deadline = GetTickCount64() + TimeoutMs;
-        for (;;)
-        {
-            if (DeskSplit::FindDeviceNode(kHardwareId, pInfo))
-            {
-                if (!pInfo->HasStatus || pInfo->Problem == 0)
-                {
-                    return true;
-                }
-            }
-            if (GetTickCount64() >= Deadline)
-            {
-                return false;
-            }
-            Sleep(250);
-        }
     }
 
     // ---- EDID override detection ------------------------------------------
@@ -233,10 +218,15 @@ namespace
             return false;
         }
 
-        WaitForSingleObject(ProcessInfo.hProcess, 120000);
+        DWORD wait = WaitForSingleObject(ProcessInfo.hProcess, 120000);
+        if (wait != WAIT_OBJECT_0) {
+            DWORD error = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+            TerminateProcess(ProcessInfo.hProcess, error);
+            CloseHandle(ProcessInfo.hThread); CloseHandle(ProcessInfo.hProcess); SetLastError(error); return false;
+        }
         if (!GetExitCodeProcess(ProcessInfo.hProcess, pExitCode))
         {
-            *pExitCode = static_cast<DWORD>(-1);
+            DWORD error = GetLastError(); CloseHandle(ProcessInfo.hThread); CloseHandle(ProcessInfo.hProcess); SetLastError(error); return false;
         }
 
         CloseHandle(ProcessInfo.hThread);
@@ -340,300 +330,204 @@ namespace DeskSplit
     }
 
     _Use_decl_annotations_
-    int RunInstallSequence(const InstallOptions* pOptions, IStepSink* pSink)
+    int RunInstallSequence(const InstallOptions* options, IStepSink* sink)
     {
-        pSink->OnProgress(0);
-
-        // ---- 1. payload ---------------------------------------------------
-        Stepf(pSink, L"Checking the installer contents");
-        if (!HasEmbeddedPayload())
-        {
-            Errorf(pSink, L"This installer does not contain a driver package.");
-            return ExitPayloadMissing;
-        }
-        if (!ResourceExists(IDR_APP_EXE) || !ResourceExists(IDR_DSCOMP_EXE) ||
-            !ResourceExists(IDR_EDIDOVERRIDE_EXE))
-        {
-            Errorf(pSink, L"This installer is missing the DesktopSplitter program files.");
-            return ExitPayloadMissing;
-        }
-        Detailf(pSink, L"Driver package and program files present.");
-        pSink->OnProgress(5);
-
-        ExtractedPackage Package = {};
-        Stepf(pSink, L"Unpacking the driver");
-        DWORD Error = ExtractPayload(&Package);
-        if (Error != ERROR_SUCCESS)
-        {
-            ReportWin32(pSink, L"Unpacking the driver", Error);
-            return ExitPayloadExtractFailed;
-        }
-        Detailf(pSink, L"%s", Package.Directory);
-        pSink->OnProgress(10);
-
-        int Result = ExitSuccess;
-
-        for (;;)
-        {
-            if (pSink->IsCancelled()) { Result = ExitCancelled; break; }
-
-            // ---- 2. stop anything running (upgrade case) ------------------
-            Stepf(pSink, L"Closing any running DesktopSplitter components");
-            int Stopped = 0;
-            StopRunningProcesses(&Stopped);
-            if (Stopped > 0)
-            {
-                Detailf(pSink, L"Stopped %d running component(s).", Stopped);
+        if (!IsUserAnAdmin()) { sink->OnError(L"Stage=Administrator rights Win32=5: administrator rights required; no installation performed."); return ExitNotElevated; }
+        InstallLog log(sink);
+        if (!log.Healthy()) { sink->OnError(L"Cannot create durable ProgramData installation log; installation stopped before changes."); return ExitLogFailed; }
+        struct Backend final : IInstallBackend {
+            const InstallOptions* options;
+            InstallLog& log;
+            ExtractedPackage package = {};
+            std::wstring published, backup;
+            bool reboot = false, certChanged = false;
+            DWORD bytes = 0;
+            Backend(const InstallOptions* o, InstallLog& l) : options(o), log(l) {}
+            ~Backend() { if (package.Directory[0]) CleanupPayload(&package); }
+            bool Cancelled() override { return log.IsCancelled() || !log.Healthy(); }
+            void RecordResult(InstallStage stage, const StageResult& result) override {
+                Detailf(&log, L"Stage result=%s ok=%u domain=%s code=%u (0x%08X) restart=%u %s", StageName(stage),
+                    result.ok ? 1u : 0u, result.domain.c_str(), result.code, result.code, result.restart ? 1u : 0u, result.detail.c_str());
             }
-            else
-            {
-                Detailf(pSink, L"Nothing was running.");
-            }
-            pSink->OnProgress(15);
-
-            // ---- 3. publisher trust ---------------------------------------
-            Stepf(pSink, L"Checking the driver's publisher");
-            const LONG TrustStatus = VerifyFileTrust(Package.CatPath);
-            Detailf(pSink, L"Signature check: %s", TrustStatusText(TrustStatus));
-
-            if (TrustStatus == TRUST_E_NOSIGNATURE)
-            {
-                Errorf(pSink, L"The driver package is not signed; it cannot be installed.");
-                Result = ExitCatalogUnusable;
-                break;
-            }
-
-            if (TrustStatus != ERROR_SUCCESS)
-            {
-                PCCERT_CONTEXT Cert = LoadSignerCertificate(Package.CatPath);
-                if (Cert == nullptr)
-                {
-                    ReportWin32(pSink, L"Reading the signing certificate", GetLastError());
-                    Result = ExitCatalogUnusable;
-                    break;
+            StageResult Execute(InstallStage stage) override {
+                log.OnStep(StageName(stage));
+                log.OnProgress(static_cast<int>(stage) * 100 / 12);
+                if (!log.Healthy()) return StageResult::Fail(ERROR_WRITE_FAULT, L"Persistent log write failed");
+                switch (stage) {
+                case InstallStage::Admin: return IsUserAnAdmin() ? StageResult::Pass() : StageResult::Fail(ERROR_ACCESS_DENIED, L"Administrator rights required");
+                case InstallStage::Payload: {
+                    if (!HasEmbeddedPayload() || !ResourceExists(IDR_APP_EXE) || !ResourceExists(IDR_DSCOMP_EXE) ||
+                        !ResourceExists(IDR_DEVCREATE_EXE) || !ResourceExists(IDR_EDIDOVERRIDE_EXE) || !ResourceExists(IDR_COMPOSITOR_README))
+                        return StageResult::Fail(ERROR_RESOURCE_DATA_NOT_FOUND, L"A required embedded component is missing");
+                    DWORD error = ExtractPayload(&package);
+                    return error ? StageResult::Fail(error, L"Extracting driver payload failed") : StageResult::Pass();
                 }
-
-                CertificateSummary Summary = {};
-                if (!SummarizeCertificate(Cert, &Summary))
-                {
-                    CertFreeCertificateContext(Cert);
-                    Errorf(pSink, L"The signing certificate could not be read.");
-                    Result = ExitCatalogUnusable;
-                    break;
-                }
-
-                if (!pSink->ConfirmCertificateTrust(Summary))
-                {
-                    CertFreeCertificateContext(Cert);
-                    Errorf(pSink, L"Cancelled: the publisher was not trusted. Nothing was changed.");
-                    Result = ExitTrustDeclined;
-                    break;
-                }
-
-                const wchar_t* Stores[] = { L"Root", L"TrustedPublisher" };
-                bool CertOk = true;
-                for (const wchar_t* StoreName : Stores)
-                {
-                    const DWORD CertError = AddCertificateToStore(Cert, StoreName);
-                    if (CertError == ERROR_SUCCESS)
-                    {
-                        Detailf(pSink, L"Trusted the publisher in LocalMachine\\%s", StoreName);
+                case InstallStage::Preflight: {
+                    wchar_t dir[MAX_PATH] = {}, version[64] = {};
+                    if (ReadInstalledState(dir, ARRAYSIZE(dir), version, ARRAYSIZE(version))) {
+                        log.OnDetail((L"Previous installation: " + std::wstring(dir) + L" version=" + version).c_str());
+                        if (_wcsicmp(dir, options->InstallDir)) return StageResult::Fail(ERROR_INVALID_PARAMETER, L"Upgrade must use the existing installation directory; user settings were not changed");
+                    } else {
+                        DWORD error = GetLastError();
+                        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) return StageResult::Fail(error, L"Cannot read prior product registration");
+                        log.OnDetail(L"No prior registered product location; existing device and files are still inspected.");
                     }
-                    else
-                    {
-                        ReportWin32(pSink, L"Trusting the publisher", CertError);
-                        CertOk = false;
-                        break;
+                    return CheckUpgradeState(options->InstallDir, &log);
+                }
+                case InstallStage::Trust: {
+                    LONG trust = VerifyFileTrust(package.CatPath);
+                    Detailf(&log, L"Catalog WinVerifyTrust HRESULT=0x%08lX (%s)", static_cast<DWORD>(trust), TrustStatusText(trust));
+                    if (trust == ERROR_SUCCESS) return StageResult::Pass();
+                    if (trust != CERT_E_UNTRUSTEDROOT && trust != CERT_E_CHAINING)
+                        return StageResult::Fail(static_cast<uint32_t>(trust), L"Catalog signature validation failed; certificate stores unchanged", L"HRESULT");
+                    PCCERT_CONTEXT cert = LoadSignerCertificate(package.CatPath);
+                    if (!cert) return StageResult::Fail(GetLastError(), L"Cannot read publisher certificate");
+                    CertificateSummary summary = {};
+                    if (!SummarizeCertificate(cert, &summary)) { CertFreeCertificateContext(cert); return StageResult::Fail(ERROR_INVALID_DATA, L"Invalid publisher certificate"); }
+                    if (!log.ConfirmCertificateTrust(summary)) { CertFreeCertificateContext(cert); return StageResult::Fail(ERROR_CANCELLED, L"Explicit certificate-store consent was not granted"); }
+                    DWORD error = ERROR_SUCCESS;
+                    for (const wchar_t* store : {L"Root", L"TrustedPublisher"}) {
+                        error = AddCertificateToStore(cert, store);
+                        Detailf(&log, L"Consent-based certificate store=%s Win32=0x%08lX", store, error);
+                        if (error) break;
+                        certChanged = true;
                     }
+                    CertFreeCertificateContext(cert);
+                    if (error) return StageResult::Fail(error, L"Certificate-store change failed; earlier consented changes may remain");
+                    trust = VerifyFileTrust(package.CatPath);
+                    return trust == ERROR_SUCCESS ? StageResult::Pass() : StageResult::Fail(static_cast<uint32_t>(trust), L"Catalog still fails trust after explicit consent", L"HRESULT");
                 }
-
-                CertFreeCertificateContext(Cert);
-                if (!CertOk)
-                {
-                    Result = ExitCertInstallFailed;
-                    break;
+                case InstallStage::DriverStore: {
+                    DWORD error = StageExactDriverPackage(package.InfPath, published);
+                    Detailf(&log, L"Exact driver-store stage Win32/SetupAPI=0x%08lX OEM_INF=%s", error, published.c_str());
+                    if (error) return StageResult::Fail(error, L"Staging or verifying the exact INF failed", L"Win32/SetupAPI");
+                    InstallMethod method = InstallMethod::DiInstallDriver; bool current = false;
+                    error = InstallDriverPackage(package.InfPath, &method, &reboot, &current);
+                    Detailf(&log, L"Driver bind method=%u Win32/SetupAPI/process=0x%08lX restart=%u", static_cast<unsigned>(method), error, reboot ? 1u : 0u);
+                    if (error) return StageResult::Fail(error, L"Driver package installation failed", method == InstallMethod::PnpUtil ? L"Process(pnputil)" : L"Win32/SetupAPI(DiInstallDriver)");
+                    log.OnDetail(L"Old driver packages retained; no superseded-package pruning.");
+                    return StageResult::Pass(reboot);
                 }
-            }
-            else
-            {
-                Detailf(pSink, L"Already trusted by this PC - no changes needed.");
-            }
-            pSink->OnProgress(25);
-
-            // ---- 4. driver package ----------------------------------------
-            Stepf(pSink, L"Installing the display driver");
-
-            OemInfList Before = {};
-            FindAllOemInfs(kCatalogFileName, &Before);
-            for (size_t i = 0; i < Before.Count; ++i)
-            {
-                Detailf(pSink, L"Existing package: %s (%s)", Before.Names[i], Before.DriverVer[i]);
-            }
-
-            InstallMethod Method = InstallMethod::DiInstallDriver;
-            bool RebootRequired = false;
-            bool AlreadyCurrent = false;
-            Error = InstallDriverPackage(Package.InfPath, &Method, &RebootRequired, &AlreadyCurrent);
-
-            if (Error != ERROR_SUCCESS)
-            {
-                ReportWin32(pSink, L"Installing the display driver", Error);
-                Result = ExitDriverInstallFailed;
-                break;
-            }
-            Detailf(pSink, AlreadyCurrent
-                        ? L"This version was already installed."
-                        : L"Driver package installed.");
-            pSink->OnProgress(45);
-
-            // ---- 5. prune superseded packages -----------------------------
-            Stepf(pSink, L"Cleaning up older driver versions");
-            {
-                OemInfList After = {};
-                FindAllOemInfs(kCatalogFileName, &After);
-
-                wchar_t KeepName[MAX_PATH] = {};
-                for (size_t i = 0; i < After.Count; ++i)
-                {
-                    bool Existed = false;
-                    for (size_t j = 0; j < Before.Count; ++j)
-                    {
-                        if (_wcsicmp(After.Names[i], Before.Names[j]) == 0) { Existed = true; break; }
-                    }
-                    if (!Existed)
-                    {
-                        StringCchCopyW(KeepName, ARRAYSIZE(KeepName), After.Names[i]);
-                        Detailf(pSink, L"New package: %s (%s)", After.Names[i], After.DriverVer[i]);
-                        break;
-                    }
+                case InstallStage::Device: {
+                    bool existed = false, created = false, restart = false;
+                    DWORD error = CreateRootDeviceNode(kHardwareId, kHardwareIdMultiSz, static_cast<DWORD>(sizeof(kHardwareIdMultiSz)), kDeviceDescription, &existed, &created, &restart);
+                    reboot = reboot || restart;
+                    Detailf(&log, L"CreateRootDeviceNode Win32=0x%08lX existed=%u created=%u restart=%u", error, existed ? 1u : 0u, created ? 1u : 0u, restart ? 1u : 0u);
+                    if (error) return StageResult::Fail(error, L"Device registration/binding failed even if a node was created", L"SetupAPI");
+                    // Never force-update a second or unrelated instance. Recheck identity immediately before binding.
+                    std::vector<DeviceNodeInfo> nodes;
+                    error = ListDeviceNodes(kHardwareId, true, nodes);
+                    if (error || nodes.size() != 1) return StageResult::Fail(error ? error : ERROR_DUP_NAME, L"Cannot identify a unique present root device");
+                    BOOL needRestart = FALSE;
+                    if (!UpdateDriverForPlugAndPlayDevicesW(nullptr, kHardwareId, package.InfPath, INSTALLFLAG_FORCE, &needRestart))
+                        return StageResult::Fail(GetLastError(), L"Binding the requested INF to the identified root device failed", L"SetupAPI");
+                    reboot = reboot || needRestart != FALSE;
+                    return StageResult::Pass(reboot);
                 }
-                if (KeepName[0] == L'\0' && After.Count > 0)
-                {
-                    StringCchCopyW(KeepName, ARRAYSIZE(KeepName), After.Names[0]);
+                case InstallStage::DriverVerify: return VerifyInstalledDriver(published.c_str(), reboot, &log);
+                case InstallStage::Backup: {
+                    auto result = BackUpProductFiles(options->InstallDir, backup);
+                    log.OnDetail((L"Product file recovery directory: " + backup).c_str()); return result;
                 }
-
-                if (KeepName[0] != L'\0' && After.Count > 1)
-                {
-                    int Removed = 0, Failed = 0;
-                    RemoveSupersededPackages(kCatalogFileName, KeepName, &Removed, &Failed);
-                    Detailf(pSink, L"Removed %d older package(s).", Removed);
+                case InstallStage::Files: {
+                    DWORD error = InstallProductFiles(options->InstallDir, &bytes);
+                    return error ? StageResult::Fail(error, L"Product file copy failed (installer exit 12 is not PnP Code 12)") : StageResult::Pass();
                 }
-                else
-                {
-                    Detailf(pSink, L"Nothing to clean up.");
+                case InstallStage::FilesVerify: return VerifyProductFiles(options->InstallDir);
+                case InstallStage::Registration: {
+                    DWORD error = CreateShortcuts(options);
+                    if (error) return StageResult::Fail(error, L"Required requested shortcut creation failed", L"Win32/HRESULT");
+                    error = WriteUninstallEntry(options, bytes / 1024);
+                    if (error) return StageResult::Fail(error, L"Add/Remove Programs registration failed");
+                    error = WriteProductFlags(options);
+                    return error ? StageResult::Fail(error, L"Product registration failed") : StageResult::Pass();
                 }
-            }
-            pSink->OnProgress(55);
-
-            // ---- 6. device node -------------------------------------------
-            Stepf(pSink, L"Creating the virtual display device");
-            bool AlreadyExisted = false, NodeCreated = false, NodeReboot = false;
-            Error = CreateRootDeviceNode(kHardwareId, kHardwareIdMultiSz,
-                                         static_cast<DWORD>(sizeof(kHardwareIdMultiSz)),
-                                         kDeviceDescription,
-                                         &AlreadyExisted, &NodeCreated, &NodeReboot);
-
-            if (AlreadyExisted)
-            {
-                Detailf(pSink, L"The device already exists - reused it.");
-            }
-            else if (Error != ERROR_SUCCESS && !NodeCreated)
-            {
-                ReportWin32(pSink, L"Creating the device", Error);
-                Result = ExitDevNodeFailed;
-                break;
-            }
-            else
-            {
-                Detailf(pSink, L"Device created.");
-            }
-            pSink->OnProgress(70);
-
-            // ---- 7. verify -------------------------------------------------
-            Stepf(pSink, L"Verifying the driver");
-            DeviceNodeInfo Info = {};
-            if (!WaitForHealthyDeviceNode(&Info, 10000))
-            {
-                if (Info.InstanceId[0] == L'\0')
-                {
-                    Errorf(pSink, L"The virtual display device did not appear.");
+                case InstallStage::FinalVerify: {
+                    auto files = VerifyProductFiles(options->InstallDir); if (!files.ok) return files;
+                    wchar_t dir[MAX_PATH] = {}, version[64] = {};
+                    if (!ReadInstalledState(dir, ARRAYSIZE(dir), version, ARRAYSIZE(version)) ||
+                        _wcsicmp(dir, options->InstallDir) || wcscmp(version, kProductVersion))
+                        return StageResult::Fail(ERROR_INVALID_DATA, L"Installed product registration/version does not match");
+                    return VerifyInstalledDriver(published.c_str(), reboot, &log);
                 }
-                else
-                {
-                    Errorf(pSink, L"The device reported problem %u: %s",
-                           Info.Problem, ProblemCodeText(Info.Problem));
                 }
-                Result = ExitVerificationFailed;
-                break;
+                return StageResult::Fail(ERROR_INVALID_FUNCTION, L"Unimplemented mandatory stage");
             }
-            Detailf(pSink, L"Device %s is running.", Info.InstanceId);
-            pSink->OnProgress(80);
-
-            // ---- 8. program files ------------------------------------------
-            Stepf(pSink, L"Installing DesktopSplitter to %s", pOptions->InstallDir);
-            DWORD Bytes = 0;
-            Error = InstallProductFiles(pOptions->InstallDir, &Bytes);
-            if (Error != ERROR_SUCCESS)
-            {
-                ReportWin32(pSink, L"Copying program files", Error);
-                Result = ExitFileInstallFailed;
-                break;
+            StageResult RestoreFiles() override {
+                log.OnStep(L"Rollback of product files only");
+                auto result = RestoreProductBackup(options->InstallDir, backup);
+                if (!result.ok) Detailf(&log, L"ROLLBACK FAILED Win32=0x%08X %s", result.code, result.detail.c_str());
+                else log.OnDetail(L"Previous product bytes restored; driver bindings and partial registration are not automatically rolled back.");
+                return result;
             }
-            Detailf(pSink, L"Copied %.1f MB.", static_cast<double>(Bytes) / (1024.0 * 1024.0));
-            pSink->OnProgress(92);
-
-            // ---- 9. shortcuts, registry ------------------------------------
-            Stepf(pSink, L"Creating shortcuts and registry entries");
-            CreateShortcuts(pOptions);
-            if (pOptions->DesktopShortcut)   Detailf(pSink, L"Desktop shortcut created.");
-            if (pOptions->StartMenuShortcut) Detailf(pSink, L"Start menu shortcut created.");
-
-            WriteUninstallEntry(pOptions, Bytes / 1024);
-            Detailf(pSink, L"Registered in Add or remove programs.");
-
-            WriteProductFlags(pOptions);
-            if (pOptions->HidePhysicalDisplaySupported)
-            {
-                Detailf(pSink, L"Hide physical display: %s",
-                        pOptions->HidePhysicalDisplay ? L"enabled" : L"disabled");
+        } backend(options, log);
+        InstallOutcome result = ExecuteInstall(backend);
+        if (!log.Healthy()) { sink->OnError(L"Durable log failed; partial installation is possible. Success is not certified."); return ExitLogFailed; }
+        if (result.state == InstallState::Failed) {
+            std::vector<DeviceNodeInfo> evidence;
+            DWORD enumerate = ListDeviceNodes(kHardwareId, false, evidence);
+            Detailf(&log, L"Failure snapshot root-device enumeration Win32=0x%08lX count=%zu", enumerate, evidence.size());
+            for (const auto& node : evidence) {
+                std::wstring bound; DWORD binding = BoundInfName(node, bound);
+                Detailf(&log, L"Failure device=%s CONFIGRET=0x%08lX DN_status=0x%08lX PnP_code=%lu (%s) bound_INF=%s binding_query_Win32=0x%08lX",
+                    node.InstanceId, node.StatusResult, node.Status, node.Problem, ProblemCodeText(node.Problem), bound.c_str(), binding);
             }
-            else
-            {
-                Detailf(pSink, L"Hide physical display: not supported on this Windows edition.");
+            Errorf(&log, L"FAILED stage=%s component=DesktopSplitter/%s domain=%s code=%u (0x%08X): %s. restart=%u partial=%u rollback_files_attempted=%u rollback_files_ok=%u. Log: %s",
+                StageName(result.stage), kHardwareId, result.result.domain.c_str(), result.result.code, result.result.code,
+                result.result.detail.c_str(), result.restart ? 1u : 0u, (result.partial || backend.certChanged) ? 1u : 0u,
+                result.rollbackAttempted ? 1u : 0u, result.rollbackSucceeded ? 1u : 0u, log.Path().c_str());
+            log.OnDetail(L"Nie ustalono przyczyny, unless the explicit API evidence above identifies it. Keep the log and the matching timestamp/instance entries in setupapi.dev.log. Old driver packages and user settings were retained.");
+            switch (result.stage) {
+            case InstallStage::Admin: return ExitNotElevated;
+            case InstallStage::Payload: return ExitPayloadExtractFailed;
+            case InstallStage::Trust: return ExitCatalogUnusable;
+            case InstallStage::DriverStore: return ExitDriverInstallFailed;
+            case InstallStage::Device: return ExitDevNodeFailed;
+            case InstallStage::Backup: case InstallStage::Files: case InstallStage::FilesVerify: return ExitFileInstallFailed;
+            case InstallStage::Registration: return ExitRegistrationFailed;
+            default: return result.result.code == ERROR_CANCELLED ? ExitCancelled : ExitVerificationFailed;
             }
-
-            if (RebootRequired || NodeReboot)
-            {
-                Detailf(pSink, L"NOTE: a restart is needed to finish setting up the driver.");
-            }
-
-            pSink->OnProgress(100);
-            break;
         }
+        log.OnProgress(100);
+        if (result.state == InstallState::RestartRequired) {
+            log.OnDetail(L"RESTART REQUIRED (exit 3010). Installation files are complete; driver readiness is NOT certified. Reboot, then run DesktopSplitterSetup.exe /verify-installed before Apply.");
+            return log.Healthy() ? ExitRestartRequired : ExitLogFailed;
+        }
+        log.OnDetail(L"FINAL RESULT: READY. Mandatory stages, exact files, PnP, bound INF and GET_STATUS verified.");
+        return log.Healthy() ? ExitSuccess : ExitLogFailed;
+    }
 
-        CleanupPayload(&Package);
-        return Result;
+    int RunInstalledVerification(IStepSink* sink)
+    {
+        InstallLog log(sink);
+        if (!log.Healthy()) { sink->OnError(L"Cannot create durable verification log."); return ExitLogFailed; }
+        log.OnStep(L"Post-reboot installed product verification (no PnP changes)");
+        auto result = VerifyInstalledProduct(&log);
+        if (!result.ok) {
+            Errorf(&log, L"FAILED verification domain=%s code=%u (0x%08X): %s. Nie ustalono przyczyny beyond these API results. Log: %s",
+                result.domain.c_str(), result.code, result.code, result.detail.c_str(), log.Path().c_str());
+            return ExitVerificationFailed;
+        }
+        log.OnDetail(result.restart ? L"Restart still required; driver readiness NOT certified." : L"READY: installed files, exact INF, PnP and protocol verified.");
+        if (!log.Healthy()) return ExitLogFailed;
+        return result.restart ? ExitRestartRequired : ExitSuccess;
     }
 
     _Use_decl_annotations_
     int RunUninstallSequence(const UninstallOptions* pOptions, IStepSink* pSink)
     {
+        InstallLog persistent(pSink);
+        if (!persistent.Healthy()) { pSink->OnError(L"Cannot create persistent uninstall log; no removal attempted."); return ExitLogFailed; }
+        pSink = &persistent;
         pSink->OnProgress(0);
         int Result = ExitSuccess;
-
-        wchar_t InstallDir[MAX_PATH] = {};
-        wchar_t Version[64] = {};
-        const bool Installed = ReadInstalledState(InstallDir, ARRAYSIZE(InstallDir),
-                                                  Version, ARRAYSIZE(Version));
-
-        Stepf(pSink, L"Stopping DesktopSplitter");
-        int Stopped = 0;
-        StopRunningProcesses(&Stopped);
-        Detailf(pSink, L"Stopped %d component(s).", Stopped);
-        pSink->OnProgress(10);
-
-        Stepf(pSink, L"Restoring the display layout");
-        RevertSplit(pSink);
+        wchar_t InstallDir[MAX_PATH] = {}, Version[64] = {};
+        const bool Installed = ReadInstalledState(InstallDir, ARRAYSIZE(InstallDir), Version, ARRAYSIZE(Version));
+        if (!Installed) { Errorf(pSink, L"Product location is unknown; refusing automatic removal. Log: %s", persistent.Path().c_str()); return ExitUninstallFailed; }
+        auto preflight = CheckUpgradeState(InstallDir, pSink);
+        if (!preflight.ok) { Errorf(pSink, L"Removal preflight failed domain=%s code=%u: %s. Log: %s", preflight.domain.c_str(), preflight.code, preflight.detail.c_str(), persistent.Path().c_str()); return ExitUninstallFailed; }
+        OverriddenMonitors legacy = {}; FindOverriddenMonitors(&legacy);
+        if (legacy.Count) { Errorf(pSink, L"Legacy hidden-display recovery is required before removal; helpers and settings retained. Log: %s", persistent.Path().c_str()); return ExitUninstallFailed; }
         pSink->OnProgress(20);
 
         // ---- un-hide any monitor we hid --------------------------------
@@ -707,7 +601,7 @@ namespace DeskSplit
         if (Error != ERROR_SUCCESS)
         {
             ReportWin32(pSink, L"Removing the device", Error);
-            Result = ExitUninstallFailed;
+            return ExitUninstallFailed;
         }
         Detailf(pSink, L"Removed %d device(s).", Removed);
         pSink->OnProgress(45);
@@ -717,13 +611,18 @@ namespace DeskSplit
             OemInfList Staged = {};
             if (!FindAllOemInfs(kCatalogFileName, &Staged))
             {
+                DWORD listError = GetLastError();
+                if (listError != ERROR_NOT_FOUND && listError != ERROR_FILE_NOT_FOUND) {
+                    ReportWin32(pSink, L"Enumerating owned driver packages", listError);
+                    return ExitUninstallFailed;
+                }
                 Detailf(pSink, L"The driver was not present.");
             }
             else
             {
                 for (size_t i = 0; i < Staged.Count; ++i)
                 {
-                    const DWORD PkgError = UninstallOemInf(Staged.Names[i], true);
+                    const DWORD PkgError = UninstallOemInf(Staged.Names[i], false);
                     if (PkgError == ERROR_SUCCESS)
                     {
                         Detailf(pSink, L"Removed %s (%s)", Staged.Names[i], Staged.DriverVer[i]);
@@ -736,13 +635,15 @@ namespace DeskSplit
                 }
             }
         }
+        if (Result != ExitSuccess) return Result;
         pSink->OnProgress(65);
 
         Stepf(pSink, L"Removing shortcuts and program files");
         RemoveShortcuts();
         if (Installed)
         {
-            RemoveProductFiles(InstallDir);
+            DWORD fileError = RemoveProductFiles(InstallDir);
+            if (fileError) { ReportWin32(pSink, L"Removing product files", fileError); Result = ExitUninstallFailed; }
             Detailf(pSink, L"Removed %s", InstallDir);
         }
         RemoveUninstallEntry();
@@ -796,6 +697,7 @@ namespace DeskSplit
         }
 
         pSink->OnProgress(100);
-        return Result;
+        if (!persistent.Healthy()) return ExitLogFailed;
+        return Result == ExitSuccess && RebootRequired ? ExitRestartRequired : Result;
     }
 }

@@ -57,6 +57,9 @@ namespace DeskSplit
     // copy inside InstallDir is scheduled for delete-on-reboot if it is us.
     DWORD RemoveProductFiles(_In_z_ const wchar_t* InstallDir);
 
+    // Upgrade path: exact executable path + current session, graceful only, bounded wait.
+    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount);
+
     // Stops DesktopSplitter.exe / dscomp.exe before an upgrade or uninstall.
     void StopRunningProcesses(_Out_ int* pStoppedCount);
 

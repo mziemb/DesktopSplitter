@@ -9,6 +9,7 @@
 #include <strsafe.h>
 #include <stdio.h>
 #include <process.h>
+#include <string>
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -50,6 +51,7 @@ namespace
         bool Finished = false;
         bool Cancelled = false;
         int  Result = 0;
+        std::wstring LastError, LogPath;
         bool LaunchApp = true;
         bool RemoveCert = false;
 
@@ -127,7 +129,10 @@ namespace
         case WizardPage::Welcome:  return Un ? L"Remove DesktopSplitter" : L"Welcome to DesktopSplitter";
         case WizardPage::Options:  return Un ? L"Removal options" : L"Installation options";
         case WizardPage::Progress: return Un ? L"Removing" : L"Installing";
-        case WizardPage::Finish:   return Un ? L"Removal complete" : L"Installation complete";
+        case WizardPage::Finish:
+            if (W->Result == ExitRestartRequired) return L"Restart required — verification pending";
+            if (W->Result != ExitSuccess) return L"Setup did not complete";
+            return Un ? L"Removal complete" : L"Installation verified";
         default:                   return L"";
         }
     }
@@ -145,7 +150,9 @@ namespace
         case WizardPage::Progress:
             return L"This can take a minute. Your screen may flicker.";
         case WizardPage::Finish:
-            return Un ? L"DesktopSplitter has been removed." : L"DesktopSplitter is ready to use.";
+            if (W->Result == ExitRestartRequired) return L"The driver is not certified ready; restart and verify again.";
+            if (W->Result != ExitSuccess) return L"A mandatory stage failed. Review the diagnostic log.";
+            return Un ? L"DesktopSplitter has been removed." : L"DesktopSplitter passed installation verification.";
         default:
             return L"";
         }
@@ -339,7 +346,7 @@ namespace
 
         if (Finish)
         {
-            wchar_t Text[1024];
+            wchar_t Text[4096];
             if (W->Result == ExitSuccess)
             {
                 if (W->Mode == WizardMode::Uninstall)
@@ -357,12 +364,16 @@ namespace
                         W->Options.InstallDir);
                 }
             }
+            else if (W->Result == ExitRestartRequired)
+            {
+                StringCchPrintfW(Text, ARRAYSIZE(Text),
+                    L"Restart required (exit 3010). The driver is NOT certified ready.\r\n\r\n"
+                    L"After restart, run DesktopSplitterSetup.exe /verify-installed before Apply.\r\n\r\nLog: %s", W->LogPath.c_str());
+            }
             else
             {
                 StringCchPrintfW(Text, ARRAYSIZE(Text),
-                    L"Setup did not complete (code %d).\r\n\r\n"
-                    L"The log on the previous page shows which step failed. Nothing else was changed.",
-                    W->Result);
+                    L"Setup did not complete (installer exit %d). A partial installation may remain.\r\n\r\n%s\r\n\r\nFull log: %s", W->Result, W->LastError.c_str(), W->LogPath.c_str());
             }
             SetWindowTextW(W->Body, Text);
         }
@@ -609,6 +620,9 @@ namespace
 
         case WM_WIZ_DETAIL:
         {
+            const wchar_t* detail = reinterpret_cast<const wchar_t*>(lParam);
+            const wchar_t prefix[] = L"Persistent log: ";
+            if (wcsncmp(detail, prefix, ARRAYSIZE(prefix) - 1) == 0) W->LogPath = detail + ARRAYSIZE(prefix) - 1;
             wchar_t Line[1100];
             StringCchPrintfW(Line, ARRAYSIZE(Line), L"      %s", reinterpret_cast<const wchar_t*>(lParam));
             AppendLog(W, Line);
@@ -617,6 +631,7 @@ namespace
 
         case WM_WIZ_ERROR:
         {
+            W->LastError = reinterpret_cast<const wchar_t*>(lParam);
             wchar_t Line[1100];
             StringCchPrintfW(Line, ARRAYSIZE(Line), L"      ERROR: %s", reinterpret_cast<const wchar_t*>(lParam));
             AppendLog(W, Line);

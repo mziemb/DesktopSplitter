@@ -1,4 +1,6 @@
 #include "ProductFiles.h"
+#include <vector>
+#include <string>
 #include "Payload.h"
 #include "resource.h"
 
@@ -293,58 +295,27 @@ namespace DeskSplit
     }
 
     _Use_decl_annotations_
-    DWORD CreateShortcuts(const InstallOptions* pOptions)
+    DWORD CreateShortcuts(const InstallOptions* options)
     {
-        wchar_t AppPath[MAX_PATH] = {};
-        if (FAILED(StringCchPrintfW(AppPath, ARRAYSIZE(AppPath), L"%s\\DesktopSplitter.exe", pOptions->InstallDir)))
-        {
-            return ERROR_BUFFER_OVERFLOW;
+        wchar_t app[MAX_PATH] = {}, setup[MAX_PATH] = {}, link[MAX_PATH] = {};
+        if (FAILED(StringCchPrintfW(app, ARRAYSIZE(app), L"%s\\DesktopSplitter.exe", options->InstallDir)) ||
+            FAILED(StringCchPrintfW(setup, ARRAYSIZE(setup), L"%s\\%s", options->InstallDir, kSetupCopyName))) return ERROR_BUFFER_OVERFLOW;
+        HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        if (FAILED(init) && init != RPC_E_CHANGED_MODE) return static_cast<DWORD>(init);
+        DWORD result = ERROR_SUCCESS;
+        auto create = [&](int folder, const wchar_t* sub, const wchar_t* name, const wchar_t* target) {
+            if (result) return;
+            if (!GetShortcutPath(folder, sub, name, link, ARRAYSIZE(link))) { result = ERROR_PATH_NOT_FOUND; return; }
+            HRESULT hr = WriteShortcut(link, target, options->InstallDir, L"DesktopSplitter");
+            if (FAILED(hr)) result = static_cast<DWORD>(hr);
+        };
+        if (options->DesktopShortcut) create(CSIDL_COMMON_DESKTOPDIRECTORY, nullptr, L"DesktopSplitter.lnk", app);
+        if (options->StartMenuShortcut) {
+            create(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"DesktopSplitter.lnk", app);
+            create(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"Uninstall DesktopSplitter.lnk", setup);
         }
-
-        const HRESULT ComInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        DWORD Result = ERROR_SUCCESS;
-
-        if (pOptions->DesktopShortcut)
-        {
-            wchar_t Link[MAX_PATH] = {};
-            if (GetShortcutPath(CSIDL_COMMON_DESKTOPDIRECTORY, nullptr, L"DesktopSplitter.lnk", Link, ARRAYSIZE(Link)))
-            {
-                const HRESULT hr = WriteShortcut(Link, AppPath, pOptions->InstallDir, L"Split one monitor into several");
-                if (FAILED(hr))
-                {
-                    Result = static_cast<DWORD>(hr);
-                }
-            }
-        }
-
-        if (pOptions->StartMenuShortcut)
-        {
-            wchar_t Link[MAX_PATH] = {};
-            if (GetShortcutPath(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"DesktopSplitter.lnk", Link, ARRAYSIZE(Link)))
-            {
-                const HRESULT hr = WriteShortcut(Link, AppPath, pOptions->InstallDir, L"Split one monitor into several");
-                if (FAILED(hr))
-                {
-                    Result = static_cast<DWORD>(hr);
-                }
-            }
-
-            wchar_t Uninstall[MAX_PATH] = {};
-            wchar_t SetupPath[MAX_PATH] = {};
-            StringCchPrintfW(SetupPath, ARRAYSIZE(SetupPath), L"%s\\%s", pOptions->InstallDir, kSetupCopyName);
-            if (GetShortcutPath(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"Uninstall DesktopSplitter.lnk",
-                                Uninstall, ARRAYSIZE(Uninstall)))
-            {
-                WriteShortcut(Uninstall, SetupPath, pOptions->InstallDir, L"Remove DesktopSplitter");
-            }
-        }
-
-        if (SUCCEEDED(ComInit))
-        {
-            CoUninitialize();
-        }
-
-        return Result;
+        if (SUCCEEDED(init)) CoUninitialize();
+        return result;
     }
 
     void RemoveShortcuts()
@@ -379,29 +350,38 @@ namespace DeskSplit
     DWORD WriteUninstallEntry(const InstallOptions* pOptions, DWORD EstimatedSizeKb)
     {
         wchar_t SetupPath[MAX_PATH] = {};
-        StringCchPrintfW(SetupPath, ARRAYSIZE(SetupPath), L"%s\\%s", pOptions->InstallDir, kSetupCopyName);
+        if (FAILED(StringCchPrintfW(SetupPath, ARRAYSIZE(SetupPath), L"%s\\%s", pOptions->InstallDir, kSetupCopyName))) return ERROR_BUFFER_OVERFLOW;
 
         wchar_t UninstallCommand[MAX_PATH + 32] = {};
-        StringCchPrintfW(UninstallCommand, ARRAYSIZE(UninstallCommand), L"\"%s\" /uninstall", SetupPath);
+        if (FAILED(StringCchPrintfW(UninstallCommand, ARRAYSIZE(UninstallCommand), L"\"%s\" /uninstall", SetupPath))) return ERROR_BUFFER_OVERFLOW;
 
         wchar_t QuietCommand[MAX_PATH + 32] = {};
-        StringCchPrintfW(QuietCommand, ARRAYSIZE(QuietCommand), L"\"%s\" /uninstall /quiet", SetupPath);
+        if (FAILED(StringCchPrintfW(QuietCommand, ARRAYSIZE(QuietCommand), L"\"%s\" /uninstall /quiet", SetupPath))) return ERROR_BUFFER_OVERFLOW;
 
         wchar_t AppPath[MAX_PATH] = {};
-        StringCchPrintfW(AppPath, ARRAYSIZE(AppPath), L"%s\\DesktopSplitter.exe", pOptions->InstallDir);
+        if (FAILED(StringCchPrintfW(AppPath, ARRAYSIZE(AppPath), L"%s\\DesktopSplitter.exe", pOptions->InstallDir))) return ERROR_BUFFER_OVERFLOW;
 
         DWORD Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"DisplayName", kProductName);
         if (Error != ERROR_SUCCESS) return Error;
 
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"DisplayVersion", kProductVersion);
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"Publisher", kPublisher);
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"InstallLocation", pOptions->InstallDir);
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"UninstallString", UninstallCommand);
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"QuietUninstallString", QuietCommand);
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"DisplayIcon", AppPath);
-        WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"EstimatedSize", EstimatedSizeKb);
-        WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"NoModify", 1);
-        WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"NoRepair", 1);
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"DisplayVersion", kProductVersion);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"Publisher", kPublisher);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"InstallLocation", pOptions->InstallDir);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"UninstallString", UninstallCommand);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"QuietUninstallString", QuietCommand);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"DisplayIcon", AppPath);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"EstimatedSize", EstimatedSizeKb);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"NoModify", 1);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"NoRepair", 1);
+        if (Error != ERROR_SUCCESS) return Error;
 
         return ERROR_SUCCESS;
     }
@@ -417,15 +397,18 @@ namespace DeskSplit
         DWORD Error = WriteRegString(HKEY_LOCAL_MACHINE, kProductRegKey, L"InstallLocation", pOptions->InstallDir);
         if (Error != ERROR_SUCCESS) return Error;
 
-        WriteRegString(HKEY_LOCAL_MACHINE, kProductRegKey, L"Version", kProductVersion);
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kProductRegKey, L"Version", kProductVersion);
+
+        if (Error != ERROR_SUCCESS) return Error;
 
         // Consumed by the app / compositor; the installer only records intent.
-        WriteRegDword(HKEY_LOCAL_MACHINE, kProductRegKey, L"HidePhysicalDisplaySupported",
+        Error = WriteRegDword(HKEY_LOCAL_MACHINE, kProductRegKey, L"HidePhysicalDisplaySupported",
                       pOptions->HidePhysicalDisplaySupported ? 1u : 0u);
-        WriteRegDword(HKEY_LOCAL_MACHINE, kProductRegKey, L"HidePhysicalDisplay",
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegDword(HKEY_LOCAL_MACHINE, kProductRegKey, L"HidePhysicalDisplay",
                       (pOptions->HidePhysicalDisplaySupported && pOptions->HidePhysicalDisplay) ? 1u : 0u);
 
-        return ERROR_SUCCESS;
+        return Error;
     }
 
     void RemoveProductFlags()
@@ -434,27 +417,25 @@ namespace DeskSplit
     }
 
     _Use_decl_annotations_
-    bool ReadInstalledState(wchar_t* InstallDir, size_t DirChars, wchar_t* Version, size_t VerChars)
+    bool ReadInstalledState(wchar_t* directory, size_t dirChars, wchar_t* version, size_t versionChars)
     {
-        if (DirChars) InstallDir[0] = L'\0';
-        if (VerChars) Version[0] = L'\0';
-
-        HKEY Key = nullptr;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kUninstallRegKey, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
-        {
-            return false;
-        }
-
-        DWORD Type = 0;
-        DWORD Bytes = static_cast<DWORD>(DirChars * sizeof(wchar_t));
-        RegQueryValueExW(Key, L"InstallLocation", nullptr, &Type, reinterpret_cast<BYTE*>(InstallDir), &Bytes);
-
-        Type = 0;
-        Bytes = static_cast<DWORD>(VerChars * sizeof(wchar_t));
-        RegQueryValueExW(Key, L"DisplayVersion", nullptr, &Type, reinterpret_cast<BYTE*>(Version), &Bytes);
-
-        RegCloseKey(Key);
-        return InstallDir[0] != L'\0';
+        if (!dirChars || !versionChars) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+        directory[0] = version[0] = 0;
+        HKEY key = nullptr;
+        LONG error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kUninstallRegKey, 0, KEY_QUERY_VALUE, &key);
+        if (error != ERROR_SUCCESS) { SetLastError(static_cast<DWORD>(error)); return false; }
+        auto read = [&](const wchar_t* name, wchar_t* value, size_t chars) -> LONG {
+            DWORD type = 0, size = static_cast<DWORD>(chars * sizeof(wchar_t));
+            LONG rc = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(value), &size);
+            if (rc != ERROR_SUCCESS) return rc;
+            if (type != REG_SZ || size < sizeof(wchar_t) || size > chars * sizeof(wchar_t) || value[size / sizeof(wchar_t) - 1] != 0 || !value[0]) return ERROR_INVALID_DATA;
+            return ERROR_SUCCESS;
+        };
+        error = read(L"InstallLocation", directory, dirChars);
+        if (!error) error = read(L"DisplayVersion", version, versionChars);
+        RegCloseKey(key);
+        SetLastError(static_cast<DWORD>(error));
+        return error == ERROR_SUCCESS;
     }
 
     _Use_decl_annotations_
@@ -510,6 +491,51 @@ namespace DeskSplit
     }
 
     _Use_decl_annotations_
+    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount)
+    {
+        *pStoppedCount = 0;
+        DWORD ownSession = 0;
+        if (!ProcessIdToSessionId(GetCurrentProcessId(), &ownSession)) return GetLastError();
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return GetLastError();
+        struct Running { DWORD pid; HANDLE process; };
+        std::vector<Running> running;
+        DWORD error = ERROR_SUCCESS;
+        PROCESSENTRY32W entry = {}; entry.dwSize = sizeof(entry);
+        if (!Process32FirstW(snapshot, &entry) && GetLastError() != ERROR_NO_MORE_FILES) error = GetLastError();
+        else do {
+            if (_wcsicmp(entry.szExeFile, L"DesktopSplitter.exe") && _wcsicmp(entry.szExeFile, L"dscomp.exe")) continue;
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, entry.th32ProcessID);
+            if (!process) { error = GetLastError(); break; }
+            wchar_t actual[32768] = {}; DWORD chars = ARRAYSIZE(actual), session = 0;
+            std::wstring expected = std::wstring(InstallDir) + L"\\" + entry.szExeFile;
+            if (!QueryFullProcessImageNameW(process, 0, actual, &chars) || !ProcessIdToSessionId(entry.th32ProcessID, &session)) error = GetLastError();
+            else if (_wcsicmp(actual, expected.c_str()) || session != ownSession) error = ERROR_BUSY;
+            if (error) { CloseHandle(process); break; }
+            running.push_back({entry.th32ProcessID, process});
+        } while (Process32NextW(snapshot, &entry));
+        CloseHandle(snapshot);
+        // Inspect every candidate before sending any close request; never kill by basename.
+        if (!error) {
+            for (const auto& process : running) {
+                EnumWindows([](HWND window, LPARAM context) -> BOOL {
+                    DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+                    if (pid == static_cast<DWORD>(context)) PostMessageW(window, WM_CLOSE, 0, 0);
+                    return TRUE;
+                }, static_cast<LPARAM>(process.pid));
+            }
+            ULONGLONG deadline = GetTickCount64() + 5000;
+            for (const auto& process : running) {
+                DWORD remaining = GetTickCount64() >= deadline ? 0 : static_cast<DWORD>(deadline - GetTickCount64());
+                DWORD wait = WaitForSingleObject(process.process, remaining);
+                if (wait != WAIT_OBJECT_0) { error = wait == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError(); break; }
+                ++*pStoppedCount;
+            }
+        }
+        for (const auto& process : running) CloseHandle(process.process);
+        return error;
+    }
+
     void StopRunningProcesses(int* pStoppedCount)
     {
         *pStoppedCount = 0;
