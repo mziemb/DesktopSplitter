@@ -2,6 +2,7 @@
 
 #include <newdev.h>
 #include <devguid.h>
+#include <devpkey.h>
 #include <wchar.h>
 
 #pragma comment(lib, "setupapi.lib")
@@ -81,6 +82,9 @@ namespace DeskSplit
             info.DevInst = data.DevInst;
             info.StatusResult = CM_Get_DevNode_Status(&info.Status, &info.Problem, info.DevInst, 0);
             info.HasStatus = info.StatusResult == CR_SUCCESS;
+            DEVPROPTYPE problemType = 0; ULONG problemBytes = sizeof(info.ProblemStatus);
+            info.HasProblemStatus = CM_Get_DevNode_PropertyW(info.DevInst, &DEVPKEY_Device_ProblemStatus,
+                &problemType, reinterpret_cast<BYTE*>(&info.ProblemStatus), &problemBytes, 0) == CR_SUCCESS && problemType == DEVPROP_TYPE_NTSTATUS;
             Nodes.push_back(info);
         }
         SetupDiDestroyDeviceInfoList(set);

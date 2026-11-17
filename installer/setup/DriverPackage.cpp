@@ -1,4 +1,5 @@
 #include "DriverPackage.h"
+#include "InstallEngine.h"
 
 #include <setupapi.h>
 #include <strsafe.h>
@@ -37,7 +38,7 @@ namespace
         return false;
     }
 
-    DWORD RunProcessAndWait(const wchar_t* ApplicationPath, wchar_t* MutableCommandLine, DWORD* pExitCode)
+    DWORD RunProcessAndWait(const wchar_t* ApplicationPath, wchar_t* MutableCommandLine, DWORD* pExitCode, DeskSplit::IStepSink* sink)
     {
         STARTUPINFOW StartupInfo = {};
         StartupInfo.cb = sizeof(StartupInfo);
@@ -59,11 +60,16 @@ namespace
             return GetLastError();
         }
 
+        if (sink) sink->OnDetail((L"Started pnputil child PID=" + std::to_wstring(ProcessInfo.dwProcessId)).c_str());
         DWORD wait = WaitForSingleObject(ProcessInfo.hProcess, 120000);
         if (wait != WAIT_OBJECT_0) {
             DWORD error = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
-            TerminateProcess(ProcessInfo.hProcess, error); // Only our own timed-out pnputil child.
-            WaitForSingleObject(ProcessInfo.hProcess, 3000);
+            BOOL terminated = TerminateProcess(ProcessInfo.hProcess, error); // Only our own timed-out pnputil child.
+            DWORD terminationError = terminated ? ERROR_SUCCESS : GetLastError();
+            DWORD exitWait = WaitForSingleObject(ProcessInfo.hProcess, 3000);
+            if (sink) sink->OnDetail((L"pnputil timeout/wait failure=" + std::to_wstring(error) +
+                L" termination_Win32=" + std::to_wstring(terminationError) + L" exit_wait=" + std::to_wstring(exitWait) +
+                L"; PnP server work may still be incomplete").c_str());
             CloseHandle(ProcessInfo.hThread); CloseHandle(ProcessInfo.hProcess);
             return error;
         }
@@ -79,10 +85,11 @@ namespace
         CloseHandle(ProcessInfo.hProcess);
 
         *pExitCode = ExitCode;
+        if (sink) sink->OnDetail((L"pnputil process exit=" + std::to_wstring(ExitCode)).c_str());
         return ExitCode == STILL_ACTIVE ? ERROR_TIMEOUT : ERROR_SUCCESS;
     }
 
-    DWORD RunPnpUtilAddDriver(const wchar_t* InfPath, bool* pRebootRequired)
+    DWORD RunPnpUtilAddDriver(const wchar_t* InfPath, bool* pRebootRequired, DeskSplit::IStepSink* sink)
     {
         wchar_t SystemDir[MAX_PATH] = {};
         if (GetSystemDirectoryW(SystemDir, static_cast<UINT>(ARRAYSIZE(SystemDir))) == 0)
@@ -108,7 +115,7 @@ namespace
         }
 
         DWORD ExitCode = 0;
-        const DWORD Error = RunProcessAndWait(PnpUtilPath, CommandLine, &ExitCode);
+        const DWORD Error = RunProcessAndWait(PnpUtilPath, CommandLine, &ExitCode, sink);
         if (Error != ERROR_SUCCESS)
         {
             return Error;
@@ -163,7 +170,8 @@ namespace DeskSplit
         const wchar_t* InfPath,
         InstallMethod* pMethod,
         bool* pRebootRequired,
-        bool* pAlreadyCurrent)
+        bool* pAlreadyCurrent,
+        IStepSink* sink)
     {
         *pMethod = InstallMethod::DiInstallDriver;
         *pRebootRequired = false;
@@ -226,7 +234,7 @@ namespace DeskSplit
         }
 
         *pMethod = InstallMethod::PnpUtil;
-        return RunPnpUtilAddDriver(InfPath, pRebootRequired);
+        return RunPnpUtilAddDriver(InfPath, pRebootRequired, sink);
     }
 
     _Use_decl_annotations_

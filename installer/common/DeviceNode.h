@@ -23,6 +23,8 @@ namespace DeskSplit
         DEVINST DevInst;
         ULONG   Status;         // CM_Get_DevNode_Status output
         ULONG   Problem;        // CM_PROB_* (0 when healthy)
+        ULONG   ProblemStatus;  // DEVPKEY_Device_ProblemStatus (NTSTATUS), if available
+        bool    HasProblemStatus;
         ULONG   StatusResult;   // raw CONFIGRET (separate namespace from PnP/Win32)
         bool    HasStatus;      // false if CM_Get_DevNode_Status failed
     };

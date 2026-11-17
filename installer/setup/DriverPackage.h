@@ -7,6 +7,7 @@
 
 namespace DeskSplit
 {
+    struct IStepSink;
     enum class InstallMethod
     {
         DiInstallDriver,    // newdev.dll!DiInstallDriverW
@@ -26,7 +27,8 @@ namespace DeskSplit
         _In_z_ const wchar_t* InfPath,
         _Out_ InstallMethod* pMethod,
         _Out_ bool* pRebootRequired,
-        _Out_ bool* pAlreadyCurrent);
+        _Out_ bool* pAlreadyCurrent,
+        IStepSink* pSink = nullptr);
 
     // Finds the oemNN.inf name in %WINDIR%\INF that corresponds to our package,
     // by matching the [Version] CatalogFile entry. Returns false if not staged.

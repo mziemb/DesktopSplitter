@@ -9,4 +9,5 @@
 #include <winioctl.h>
 
 #include <initguid.h>
+#include <devpkey.h>
 #include "DeskSplitProtocol.h"

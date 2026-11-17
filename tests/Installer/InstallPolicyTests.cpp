@@ -48,6 +48,7 @@ int main() {
     test("incompatible protocol is fatal even after requesting restart", [] { MockBackend b; b.device.compatibleProtocol = false; b.device.reboot = true; Check(ExecuteInstall(b).state == InstallState::Failed); });
     test("malformed reply is rejected", [] { MockBackend b; b.device.validReply = false; Check(ExecuteInstall(b).state == InstallState::Failed); });
     test("copy failure restores old files and reports partial PnP changes", [] { MockBackend b; b.failAt = InstallStage::Files; b.failure = StageResult::Fail(12, L"copy failure", L"Win32"); auto r = ExecuteInstall(b); Check(r.state == InstallState::Failed && r.rollbackSucceeded && r.result.domain != L"PnP"); });
+    test("driver replaying an old active split is not installation success", [] { MockBackend b; b.device.activeMonitors = 2; Check(ExecuteInstall(b).state == InstallState::Failed); });
     test("cancellation cannot return an uninitialized success", [] { MockBackend b; b.cancel = true; Check(ExecuteInstall(b).state == InstallState::Failed && b.calls.empty()); });
     test("every mandatory stage failure prevents ready", [] {
         for (int i = 0; i < 12; ++i) { MockBackend b; b.failAt = static_cast<InstallStage>(i); auto r = ExecuteInstall(b); Check(r.state == InstallState::Failed && r.stage == b.failAt && b.calls.size() == static_cast<size_t>(i + 1)); }

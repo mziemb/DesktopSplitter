@@ -441,42 +441,34 @@ namespace DeskSplit
     _Use_decl_annotations_
     DWORD RemoveProductFiles(const wchar_t* InstallDir)
     {
-        if (InstallDir == nullptr || InstallDir[0] == L'\0')
-        {
-            return ERROR_SUCCESS;
+        if (!InstallDir || !InstallDir[0]) return ERROR_INVALID_PARAMETER;
+        wchar_t self[MAX_PATH] = {};
+        DWORD length = GetModuleFileNameW(nullptr, self, ARRAYSIZE(self));
+        if (!length) return GetLastError();
+        if (length >= ARRAYSIZE(self)) return ERROR_INSUFFICIENT_BUFFER;
+        auto remove = [](const std::wstring& path) -> DWORD {
+            if (DeleteFileW(path.c_str())) return ERROR_SUCCESS;
+            DWORD error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? ERROR_SUCCESS : error;
+        };
+        for (const ProductFile& file : kProductFiles) {
+            DWORD error = remove(std::wstring(InstallDir) + L"\\" + file.Name);
+            if (error) return error;
         }
-
-        wchar_t SelfPath[MAX_PATH] = {};
-        GetModuleFileNameW(nullptr, SelfPath, ARRAYSIZE(SelfPath));
-
-        for (const ProductFile& File : kProductFiles)
-        {
-            wchar_t Path[MAX_PATH] = {};
-            if (SUCCEEDED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"%s\\%s", InstallDir, File.Name)))
-            {
-                DeleteFileW(Path);
-            }
+        std::wstring setup = std::wstring(InstallDir) + L"\\" + kSetupCopyName;
+        bool restart = _wcsicmp(self, setup.c_str()) == 0;
+        if (restart) {
+            if (!MoveFileExW(setup.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT)) return GetLastError();
+        } else {
+            DWORD error = remove(setup);
+            if (error) return error;
         }
-
-        wchar_t SetupPath[MAX_PATH] = {};
-        if (SUCCEEDED(StringCchPrintfW(SetupPath, ARRAYSIZE(SetupPath), L"%s\\%s", InstallDir, kSetupCopyName)))
-        {
-            if (_wcsicmp(SelfPath, SetupPath) == 0)
-            {
-                // We are running from the copy being removed: it cannot be
-                // deleted now, so let the OS drop it on the next boot.
-                MoveFileExW(SetupPath, nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
-            }
-            else
-            {
-                DeleteFileW(SetupPath);
-            }
+        if (!RemoveDirectoryW(InstallDir)) {
+            DWORD error = GetLastError();
+            // Preserve unrelated user files and the running setup scheduled for deletion.
+            if (error != ERROR_DIR_NOT_EMPTY && error != ERROR_PATH_NOT_FOUND) return error;
         }
-
-        // Only succeeds when empty, which is what we want: never delete files
-        // the user put there.
-        RemoveDirectoryW(InstallDir);
-        return ERROR_SUCCESS;
+        return restart ? ERROR_SUCCESS_REBOOT_REQUIRED : ERROR_SUCCESS;
     }
 
     void SignalCompositorStop()
@@ -514,6 +506,7 @@ namespace DeskSplit
             if (error) { CloseHandle(process); break; }
             running.push_back({entry.th32ProcessID, process});
         } while (Process32NextW(snapshot, &entry));
+        if (!error && GetLastError() != ERROR_NO_MORE_FILES) error = GetLastError();
         CloseHandle(snapshot);
         // Inspect every candidate before sending any close request; never kill by basename.
         if (!error) {

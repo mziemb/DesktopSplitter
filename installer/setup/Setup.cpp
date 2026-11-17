@@ -192,6 +192,7 @@ namespace
             L"                                           installed, change nothing (no admin)\n"
             L"  DesktopSplitterSetup.exe /?              this help\n"
             L"\n"
+            L"  DesktopSplitterSetup.exe /verify-installed  verify installed runtime after reboot (no PnP changes)\n"
             L"Options (console modes):\n"
             L"  /dir <path>   install location (default %%ProgramFiles%%\\DesktopSplitter)\n"
             L"  /noshortcut   do not create desktop or Start menu shortcuts\n"
@@ -208,7 +209,8 @@ namespace
             L"   3 embedded package missing  10 post-install verification failed\n"
             L"   4 package extraction failed 11 uninstall failed\n"
             L"   5 catalog unusable          12 copying program files failed\n"
-            L"   6 trust declined by user    13 cancelled\n");
+            L"   6 trust declined by user    13 cancelled\n"
+            L"  14 registration failed       15 durable log unavailable/failed\n");
     }
 
     // ---- /verify ----------------------------------------------------------

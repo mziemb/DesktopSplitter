@@ -24,7 +24,7 @@ DWORD CompareBytes(const wchar_t* path, const void* expected, DWORD length) {
     std::vector<BYTE> chunk(65536);
     DWORD offset = 0;
     while (!result && offset < length) {
-        DWORD count = 0, wanted = (std::min)(65536u, length - offset);
+        DWORD count = 0, wanted = (std::min<DWORD>)(65536, length - offset);
         if (!ReadFile(file, chunk.data(), wanted, &count, nullptr)) { result = GetLastError(); break; }
         if (count != wanted || memcmp(chunk.data(), static_cast<const BYTE*>(expected) + offset, count)) { result = ERROR_CRC; break; }
         offset += count;
@@ -124,6 +124,8 @@ StageResult VerifyInstalledDriver(const wchar_t* expectedInf, bool reboot, IStep
         StringCchPrintfW(text, ARRAYSIZE(text), L"Device=%s CM_status_read=%u status=0x%08lX PnP_problem=%lu bound_INF=%s expected_INF=%s bound_query_Win32=0x%08lX",
             node.InstanceId, node.HasStatus ? 1u : 0u, node.Status, node.Problem, bound.c_str(), expectedInf, error);
         sink->OnDetail(text);
+        StringCchPrintfW(text, ARRAYSIZE(text), L"Device problem NTSTATUS available=%u value=0x%08lX", node.HasProblemStatus ? 1u : 0u, node.ProblemStatus);
+        sink->OnDetail(text);
         DeviceEvidence evidence;
         evidence.present = true; evidence.statusRead = node.HasStatus;
         if (!node.HasStatus) return StageResult::Fail(node.StatusResult, L"CM_Get_DevNode_Status failed", L"ConfigurationManager");
@@ -134,7 +136,7 @@ StageResult VerifyInstalledDriver(const wchar_t* expectedInf, bool reboot, IStep
         StageResult probe = node.HasStatus && !node.Problem && evidence.started ? ProbeDriver(node, active)
             : Error(ERROR_NOT_READY, L"Probe withheld until PnP starts the device");
         evidence.replied = probe.ok || probe.domain == L"Protocol";
-        evidence.validReply = probe.ok; evidence.compatibleProtocol = probe.ok;
+        evidence.validReply = probe.ok; evidence.compatibleProtocol = probe.ok; evidence.activeMonitors = active;
         last = EvaluateDevice(evidence);
         if (last.ok) {
             wchar_t windows[MAX_PATH] = {};
@@ -240,8 +242,8 @@ StageResult RestoreProductBackup(const wchar_t* directory, const std::wstring& b
         if (attr == INVALID_FILE_ATTRIBUTES) {
             DWORD error = GetLastError(); if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) return Error(error, L"Cannot inspect backup");
             if (!DeleteFileW(to.c_str())) {
-                DWORD error = GetLastError();
-                if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) return Error(error, L"Cannot remove newly created product file: " + to);
+                DWORD deleteError = GetLastError();
+                if (deleteError != ERROR_FILE_NOT_FOUND && deleteError != ERROR_PATH_NOT_FOUND) return Error(deleteError, L"Cannot remove newly created product file: " + to);
             }
         } else {
             if (!CopyFileW(from.c_str(), to.c_str(), FALSE)) return Error(GetLastError(), L"Cannot restore " + to);

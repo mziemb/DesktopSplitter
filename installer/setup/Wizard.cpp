@@ -373,12 +373,13 @@ namespace
             else
             {
                 StringCchPrintfW(Text, ARRAYSIZE(Text),
-                    L"Setup did not complete (installer exit %d). A partial installation may remain.\r\n\r\n%s\r\n\r\nFull log: %s", W->Result, W->LastError.c_str(), W->LogPath.c_str());
+                    L"Setup did not complete (installer exit %d). Partial changes may remain.\r\nLog: %s\r\n\r\n%s", W->Result, W->LogPath.c_str(), W->LastError.c_str());
             }
             SetWindowTextW(W->Body, Text);
         }
 
-        EnableWindow(W->BtnBack, (Options && !W->Running) ? TRUE : FALSE);
+        EnableWindow(W->BtnBack, ((Options && !W->Running) || (Finish && !W->LogPath.empty())) ? TRUE : FALSE);
+        SetWindowTextW(W->BtnBack, Finish ? L"View log" : L"Back");
         EnableWindow(W->BtnNext, (!Progress || W->Finished) ? TRUE : FALSE);
         EnableWindow(W->BtnCancel, Finish ? FALSE : TRUE);
 
@@ -585,6 +586,12 @@ namespace
                 return 0;
 
             case IDC_BTN_BACK:
+                if (W->Page == WizardPage::Finish && !W->LogPath.empty()) {
+                    std::wstring args = L"\"" + W->LogPath + L"\"";
+                    HINSTANCE opened = ShellExecuteW(Window, L"open", L"notepad.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+                    if (reinterpret_cast<INT_PTR>(opened) <= 32) MessageBoxW(Window, W->LogPath.c_str(), L"Open this log manually", MB_OK | MB_ICONWARNING);
+                    return 0;
+                }
                 if (W->Page == WizardPage::Options) ShowPage(W, WizardPage::Welcome);
                 return 0;
 

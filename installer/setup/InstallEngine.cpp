@@ -402,7 +402,7 @@ namespace DeskSplit
                     Detailf(&log, L"Exact driver-store stage Win32/SetupAPI=0x%08lX OEM_INF=%s", error, published.c_str());
                     if (error) return StageResult::Fail(error, L"Staging or verifying the exact INF failed", L"Win32/SetupAPI");
                     InstallMethod method = InstallMethod::DiInstallDriver; bool current = false;
-                    error = InstallDriverPackage(package.InfPath, &method, &reboot, &current);
+                    error = InstallDriverPackage(package.InfPath, &method, &reboot, &current, &log);
                     Detailf(&log, L"Driver bind method=%u Win32/SetupAPI/process=0x%08lX restart=%u", static_cast<unsigned>(method), error, reboot ? 1u : 0u);
                     if (error) return StageResult::Fail(error, L"Driver package installation failed", method == InstallMethod::PnpUtil ? L"Process(pnputil)" : L"Win32/SetupAPI(DiInstallDriver)");
                     log.OnDetail(L"Old driver packages retained; no superseded-package pruning.");
@@ -471,6 +471,7 @@ namespace DeskSplit
                 std::wstring bound; DWORD binding = BoundInfName(node, bound);
                 Detailf(&log, L"Failure device=%s CONFIGRET=0x%08lX DN_status=0x%08lX PnP_code=%lu (%s) bound_INF=%s binding_query_Win32=0x%08lX",
                     node.InstanceId, node.StatusResult, node.Status, node.Problem, ProblemCodeText(node.Problem), bound.c_str(), binding);
+                Detailf(&log, L"Failure problem NTSTATUS available=%u value=0x%08lX", node.HasProblemStatus ? 1u : 0u, node.ProblemStatus);
             }
             Errorf(&log, L"FAILED stage=%s component=DesktopSplitter/%s domain=%s code=%u (0x%08X): %s. restart=%u partial=%u rollback_files_attempted=%u rollback_files_ok=%u. Log: %s",
                 StageName(result.stage), kHardwareId, result.result.domain.c_str(), result.result.code, result.result.code,
@@ -643,7 +644,8 @@ namespace DeskSplit
         if (Installed)
         {
             DWORD fileError = RemoveProductFiles(InstallDir);
-            if (fileError) { ReportWin32(pSink, L"Removing product files", fileError); Result = ExitUninstallFailed; }
+            if (fileError == ERROR_SUCCESS_REBOOT_REQUIRED) RebootRequired = TRUE;
+            else if (fileError) { ReportWin32(pSink, L"Removing product files", fileError); return ExitUninstallFailed; }
             Detailf(pSink, L"Removed %s", InstallDir);
         }
         RemoveUninstallEntry();

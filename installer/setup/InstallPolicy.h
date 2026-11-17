@@ -80,7 +80,7 @@ inline InstallOutcome ExecuteInstall(IInstallBackend& backend) {
 }
 struct DeviceEvidence {
     bool present = false, statusRead = false, started = false, correctInf = false;
-    uint32_t problem = 0;
+    uint32_t problem = 0, activeMonitors = 0;
     bool replied = false, validReply = false, compatibleProtocol = false;
     bool reboot = false;
 };
@@ -91,6 +91,8 @@ inline StageResult EvaluateDevice(const DeviceEvidence& e) {
         return StageResult::Fail(e.problem, e.problem == 12
             ? L"CM_PROB_NORMAL_CONFLICT (PnP Code 12). Nie ustalono przyczyny. Collect setupapi.dev.log and device status."
             : L"PnP device reports a problem; driver is not operational", L"PnP");
+    if (e.replied && e.validReply && e.activeMonitors != 0)
+        return StageResult::Fail(170, L"Virtual monitors became active during installation; restore the split using its owning app before retrying");
     const bool reboot = e.reboot || e.problem == 14;
     if (!e.correctInf && !reboot) return StageResult::Fail(13, L"Device is bound to a different INF than the staged package", L"SetupAPI");
     if (!e.started || e.problem == 14 || !e.correctInf || !e.replied) {
