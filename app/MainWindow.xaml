@@ -349,6 +349,13 @@
                     <Button Content="Reset to layout defaults" Command="{Binding ResetSegmentsCommand}"/>
                 </StackPanel>
 
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,18" IsEnabled="{Binding IsIdle}">
+                    <TextBlock Text="Primary segment when splitting the primary display"
+                               VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <ComboBox MinWidth="110" ItemsSource="{Binding PrimarySegments}"
+                              SelectedIndex="{Binding PrimarySegmentIndex, Mode=TwoWay}"/>
+                </StackPanel>
+
                 <!-- ============================ display hiding ============================ -->
                 <TextBlock Text="DISPLAY HIDING (EXPERIMENTAL)" Style="{StaticResource SectionHeader}"/>
                 <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}"
@@ -357,7 +364,7 @@
                     <StackPanel>
                         <TextBlock TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11.5"
                                    Margin="0,0,0,10"
-                                   Text="Removes the physical monitor from the Windows desktop entirely instead of just covering it — the same thing as Settings &gt; Advanced display &gt; &quot;Remove display from desktop&quot;. Enable only records the intent; the monitor is hidden during Apply, once segment 1 is primary, and it comes back automatically unless you confirm within 10 seconds. Revert always restores it."/>
+                                   Text="Removes the physical monitor from the Windows desktop entirely instead of just covering it — the same thing as Settings &gt; Advanced display &gt; &quot;Remove display from desktop&quot;. Enable only records the intent; the monitor is hidden during Apply, once it is safe to hide the selected monitor, and it comes back automatically unless you confirm within 10 seconds. Revert always restores it."/>
 
                         <ItemsControl ItemsSource="{Binding Rows}">
                             <ItemsControl.ItemTemplate>

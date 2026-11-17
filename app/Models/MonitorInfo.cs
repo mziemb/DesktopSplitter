@@ -69,6 +69,11 @@ public sealed class MonitorInfo
     /// <summary>DisplayConfig target id — with the adapter LUID this addresses the monitor.</summary>
     public uint TargetId { get; init; }
 
+    public uint SourceAdapterIdLow { get; init; }
+    public int SourceAdapterIdHigh { get; init; }
+    public uint SourceId { get; init; }
+    public uint Rotation { get; init; }
+
     public bool IsPrimary { get; init; }
 
     /// <summary>True when this target belongs to the DesktopSplitter virtual driver.</summary>

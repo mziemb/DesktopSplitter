@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - name: Test managed identity, resolution and migration (no display APIs)
+      - name: Test monitor identity and primary recovery (no display APIs)
         run: dotnet run --project tests/MonitorIdentity/MonitorIdentity.Tests.csproj -c Release
       - name: Test native identity matching (no display APIs)
         run: |

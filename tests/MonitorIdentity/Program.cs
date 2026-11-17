@@ -203,6 +203,7 @@ Test("Revert requests during Apply coalesce and repeated Revert cannot overlap",
     Check(queue.Request(true) == RevertRequestDisposition.AlreadyReverting);
     queue.CompleteRevert(); Check(queue.Request(false) == RevertRequestDisposition.Start);
 });
+PrimaryPreservationTests.Run(Test, Check);
 Console.WriteLine($"{passed} tests passed; no Windows display APIs were called.");
 
 sealed class FakeHotkeyBackend : IHotkeyBackend

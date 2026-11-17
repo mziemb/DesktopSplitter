@@ -58,7 +58,7 @@ public static class DisplayConfig
     /// <summary>Includes connected hidden targets. Never interprets an inactive source name as a GDI address.</summary>
     public static IReadOnlyList<MonitorInfo> EnumerateConnected()
     {
-        (DISPLAYCONFIG_PATH_INFO[] paths, _) = QueryActiveConfig();
+        (var paths, var modes) = QueryConfig(QDC_ALL_PATHS);
 
         Dictionary<string, uint> deviceFlags = EnumerateDeviceFlags();
 
@@ -79,6 +79,12 @@ public static class DisplayConfig
             string adapterPath = GetAdapterPath(path);
 
             ModeSurvey survey = active ? SurveyModes(gdiName) : default;
+            var sourceModeIdx = path.sourceInfo.modeInfoIdx;
+            DISPLAYCONFIG_SOURCE_MODE? desktop = active && sourceModeIdx < modes.Length &&
+                modes[sourceModeIdx].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE
+                ? modes[sourceModeIdx].modeInfo.sourceMode
+                : null;
+
             uint currentRefreshMhz = path.targetInfo.refreshRate.ToMillihertz();
 
             // Exact millihertz is only knowable for the mode currently in use. If the
@@ -113,6 +119,10 @@ public static class DisplayConfig
                 AdapterIdLow = path.targetInfo.adapterId.LowPart,
                 AdapterIdHigh = path.targetInfo.adapterId.HighPart,
                 TargetId = path.targetInfo.id,
+                SourceAdapterIdLow = path.sourceInfo.adapterId.LowPart,
+                SourceAdapterIdHigh = path.sourceInfo.adapterId.HighPart,
+                SourceId = path.sourceInfo.id,
+                Rotation = path.targetInfo.rotation,
                 FriendlyName = string.IsNullOrWhiteSpace(target.FriendlyName)
                     ? FallbackName(gdiName)
                     : target.FriendlyName.Trim(),
@@ -123,10 +133,10 @@ public static class DisplayConfig
                     : target.EdidManufacturer,
                 Edid = edid,
                 DeskSplitMonitorIndex = DeskSplitIndexFromEdid(edid),
-                CurrentWidth = survey.CurrentWidth,
-                CurrentHeight = survey.CurrentHeight,
-                PositionX = survey.PositionX,
-                PositionY = survey.PositionY,
+                CurrentWidth = desktop is { } current ? (int)current.width : survey.CurrentWidth,
+                CurrentHeight = desktop is { } mode ? (int)mode.height : survey.CurrentHeight,
+                PositionX = desktop?.position.x ?? survey.PositionX,
+                PositionY = desktop?.position.y ?? survey.PositionY,
                 MaxWidth = survey.MaxWidth,
                 MaxHeight = survey.MaxHeight,
                 MaxRefreshHz = survey.MaxRefreshHz,
@@ -166,19 +176,19 @@ public static class DisplayConfig
 
     // ------------------------------------------------------------------ internals
 
-    private static (DISPLAYCONFIG_PATH_INFO[] Paths, DISPLAYCONFIG_MODE_INFO[] Modes) QueryActiveConfig()
+    internal static (DISPLAYCONFIG_PATH_INFO[] Paths, DISPLAYCONFIG_MODE_INFO[] Modes) QueryConfig(uint flags)
     {
         // The topology can change between the sizing call and the query call; retry.
         for (int attempt = 0; attempt < 5; attempt++)
         {
-            int rc = GetDisplayConfigBufferSizes(QDC_ALL_PATHS, out uint pathCount, out uint modeCount);
+            int rc = GetDisplayConfigBufferSizes(flags, out uint pathCount, out uint modeCount);
             if (rc != ERROR_SUCCESS)
                 throw new DisplayConfigException($"GetDisplayConfigBufferSizes failed (error {rc}).");
 
             var paths = new DISPLAYCONFIG_PATH_INFO[pathCount];
             var modes = new DISPLAYCONFIG_MODE_INFO[modeCount];
 
-            rc = QueryDisplayConfig(QDC_ALL_PATHS, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
+            rc = QueryDisplayConfig(flags, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
             if (rc == ERROR_SUCCESS)
             {
                 Array.Resize(ref paths, (int)pathCount);
@@ -193,7 +203,9 @@ public static class DisplayConfig
             "QueryDisplayConfig kept failing with ERROR_INSUFFICIENT_BUFFER — the display topology is changing.");
     }
 
-    private static string GetSourceGdiName(DISPLAYCONFIG_PATH_INFO path)
+    internal static string GetMonitorDevicePath(DISPLAYCONFIG_PATH_INFO path) => GetTargetName(path).DevicePath;
+
+    internal static string GetSourceGdiName(DISPLAYCONFIG_PATH_INFO path)
     {
         var req = default(DISPLAYCONFIG_SOURCE_DEVICE_NAME);
         req.viewGdiDeviceName = string.Empty;

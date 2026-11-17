@@ -17,5 +17,11 @@
     <Compile Include="../../app/Models/PixelRect.cs" Link="PixelRect.cs"/>
     <Compile Include="../../app/Services/MonitorSettingsMigration.cs" Link="MonitorSettingsMigration.cs"/>
     <Compile Include="../../app/Services/SettingsStore.cs" Link="SettingsStore.cs"/>
+    <Compile Include="../../app/Interop/DisplayArranger.cs" Link="DisplayArranger.cs"/>
+    <Compile Include="../../app/Interop/DisplayConfig.cs" Link="DisplayConfig.cs"/>
+    <Compile Include="../../app/Interop/DriverClient.cs" Link="DriverClient.cs"/>
+    <Compile Include="../../app/Interop/NativeMethods.cs" Link="NativeMethods.cs"/>
+    <Compile Include="../../app/Services/MonitorIdentityStore.cs" Link="MonitorIdentityStore.cs"/>
+    <Compile Include="../../app/Services/DisplayRecoverySnapshot.cs" Link="DisplayRecoverySnapshot.cs"/>
   </ItemGroup>
 </Project>
