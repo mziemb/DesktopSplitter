@@ -59,6 +59,7 @@ public sealed class MainViewModel : ObservableObject
 
         _selectedLayout = Layouts[0];
 
+        SaveRevertHotkeyCommand = new RelayCommand(SaveRevertHotkey, () => !IsBusy);
         Hiding = new HidingViewModel(() => SelectedMonitor, AppendStatus);
 
         LoadMonitors(announce: false);
@@ -133,6 +134,51 @@ public sealed class MainViewModel : ObservableObject
     private void StopSuspensionWatcher(bool restorePrimary)
     {
         _suspensionWatcher?.Stop(restorePrimary);
+    }
+
+    private readonly RevertRequestQueue _revertRequests = new();
+    private CancellationTokenSource? _applyCancellation;
+    private GlobalRevertHotkey? _globalRevertHotkey;
+    private bool _revertHotkeyEnabled = true;
+    private string _revertHotkeyText = RevertHotkey.DefaultGesture;
+    private string _revertHotkeyStatus = "Not registered.";
+    public bool RevertHotkeyEnabled { get => _revertHotkeyEnabled; set => SetProperty(ref _revertHotkeyEnabled, value); }
+    public string RevertHotkeyText { get => _revertHotkeyText; set => SetProperty(ref _revertHotkeyText, value); }
+    public string RevertHotkeyStatus { get => _revertHotkeyStatus; private set => SetProperty(ref _revertHotkeyStatus, value); }
+    public RelayCommand SaveRevertHotkeyCommand { get; }
+
+    public void AttachRevertHotkey(GlobalRevertHotkey hotkey)
+    {
+        _globalRevertHotkey = hotkey;
+        var settings = SettingsStore.Load();
+        RevertHotkeyEnabled = settings?.GlobalRevertHotkeyEnabled ?? true;
+        RevertHotkeyText = settings?.GlobalRevertHotkey ?? RevertHotkey.DefaultGesture;
+        ConfigureRevertHotkey(persist: false);
+    }
+    private void SaveRevertHotkey() => ConfigureRevertHotkey(persist: true);
+    private void ConfigureRevertHotkey(bool persist)
+    {
+        if (_globalRevertHotkey is null) return;
+        try
+        {
+            RevertHotkey? gesture = RevertHotkeyEnabled ? RevertHotkey.Parse(RevertHotkeyText) : null;
+            _globalRevertHotkey.Configure(gesture, () =>
+            {
+                if (!persist) return;
+                var settings = SettingsStore.Load() ?? new AppSettings();
+                settings.GlobalRevertHotkeyEnabled = RevertHotkeyEnabled;
+                settings.GlobalRevertHotkey = gesture?.ToString() ?? RevertHotkeyText;
+                SettingsStore.Save(settings);
+            });
+            RevertHotkeyStatus = gesture is null ? "Global Revert shortcut disabled." : $"Active globally: {gesture} (also in the tray).";
+            AppendStatus(RevertHotkeyStatus);
+        }
+        catch (Exception ex)
+        {
+            string active = _globalRevertHotkey.ActiveGesture?.ToString() ?? "none";
+            RevertHotkeyStatus = $"{ex.Message} Active shortcut: {active}.";
+            AppendStatus(RevertHotkeyStatus);
+        }
     }
 
     // ------------------------------------------------------------------ preferences
@@ -773,17 +819,23 @@ public sealed class MainViewModel : ObservableObject
             Confirmer = _applyConfirmer,
         };
 
+        _applyCancellation = new CancellationTokenSource();
+        CancellationToken applyToken = _applyCancellation.Token;
         IsBusy = true;
         AppendStatus($"--- Applying '{layout.Name}' to {physical.DisplayLabel} ({physical.DeviceName}) ---");
         try
         {
-            ApplyResult result = await Task.Run(() => ApplyService.Apply(request, _progress, CancellationToken.None))
+            ApplyResult result = await Task.Run(() => ApplyService.Apply(request, _progress, applyToken))
                                            .ConfigureAwait(true);
             AppendStatus(result.RolledBack
                 ? $"Change reverted — restored {result.RollbackDescription}."
                 : $"Done. {result.VirtualMonitors.Count} virtual monitor(s) active.");
 
             if (!result.RolledBack) StartSuspensionWatcher();
+        }
+        catch (OperationCanceledException)
+        {
+            AppendStatus("Apply interrupted by a Revert request.");
         }
         catch (ApplyException ex)
         {
@@ -811,26 +863,43 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
+            _applyCancellation.Dispose();
+            _applyCancellation = null;
             IsBusy = false;
-            LoadMonitors(announce: false);
-            RefreshDriverStatus();
-            RefreshCompositorStatus();
-            _ = Hiding.RefreshAsync();
+            if (_revertRequests.TakePending())
+            {
+                await RevertAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                LoadMonitors(announce: false);
+                RefreshDriverStatus();
+                RefreshCompositorStatus();
+                _ = Hiding.RefreshAsync();
+            }
         }
     }
 
     public async Task RevertAsync()
     {
+        RevertRequestDisposition disposition = _revertRequests.Request(IsBusy);
+        if (disposition == RevertRequestDisposition.AlreadyReverting) return;
+        if (disposition == RevertRequestDisposition.Queued)
+        {
+            AppendStatus("Revert queued; waiting for the current Apply operation to release the display pipeline.");
+            _applyCancellation?.Cancel();
+            return;
+        }
         IsBusy = true;
         AppendStatus("--- Reverting ---");
 
         // Drop any pending suspend state first: Revert restores primary itself, and a watcher
         // still reacting to events would fight it.
-        StopSuspensionWatcher(restorePrimary: false);
-
         try
         {
-            await Task.Run(() => ApplyService.Revert(_progress, CancellationToken.None)).ConfigureAwait(true);
+            StopSuspensionWatcher(restorePrimary: false);
+            var recoveryUi = Hiding.CreateSpecializationUi(() => Monitors.Where(m => m.IsActive).ToList());
+            await Task.Run(() => ApplyService.Revert(_progress, CancellationToken.None, recoveryUi)).ConfigureAwait(true);
         }
         catch (ApplyException ex)
         {
@@ -842,6 +911,7 @@ public sealed class MainViewModel : ObservableObject
         }
         finally
         {
+            _revertRequests.CompleteRevert();
             IsBusy = false;
             LoadMonitors(announce: false);
             RefreshDriverStatus();
@@ -925,6 +995,7 @@ public sealed class MainViewModel : ObservableObject
     private void RaiseCommandStates()
     {
         OnPropertyChanged(nameof(CanApply));
+        SaveRevertHotkeyCommand?.RaiseCanExecuteChanged();
         ApplyCommand.RaiseCanExecuteChanged();
         RevertCommand.RaiseCanExecuteChanged();
         RefreshMonitorsCommand.RaiseCanExecuteChanged();

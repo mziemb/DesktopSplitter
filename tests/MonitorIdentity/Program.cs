@@ -150,4 +150,66 @@ Test("duplicate logical IDs cannot match even if only one panel is connected", (
     b.StableMonitorId = a.StableMonitorId; var live = Physical("a", 1);
     Check(c.Match(live, new[] { live }) is null);
 });
-Console.WriteLine($"{passed} identity tests passed; no Windows display APIs were called.");
+Test("default hotkey and Windows Escape parse without changing their meaning", () => {
+    Check(RevertHotkey.Parse(RevertHotkey.DefaultGesture) == new RevertHotkey(7, 'R'));
+    Check(RevertHotkey.Parse(" windows + escape ").ToString() == "Win+Esc");
+    Check(RevertHotkey.Parse("shift+ctrl+alt+r").ToString() == RevertHotkey.DefaultGesture);
+});
+Test("invalid or explicitly reserved hotkeys are rejected", () => {
+    foreach (string input in new[] { "Esc", "Ctrl++R", "Ctrl+Ctrl+R", "Ctrl+F12", "Ctrl+Shift+Esc", "Ctrl+F25", "Banana+R" }) {
+        bool rejected = false; try { RevertHotkey.Parse(input); } catch (FormatException) { rejected = true; }
+        Check(rejected);
+    }
+});
+Test("occupied hotkey preserves old registration and saved settings", () => {
+    var backend = new FakeHotkeyBackend(); using var hotkey = new HotkeyRegistration(backend);
+    hotkey.Change(RevertHotkey.Parse(RevertHotkey.DefaultGesture), () => { });
+    int? old = hotkey.ActiveId; backend.Reject = true; bool persisted = false;
+    try { hotkey.Change(RevertHotkey.Parse("Ctrl+Alt+Q"), () => persisted = true); } catch (InvalidOperationException) { }
+    Check(!persisted && hotkey.ActiveId == old && backend.Registered.Count == 1);
+});
+Test("save failure releases candidate and preserves old shortcut", () => {
+    var backend = new FakeHotkeyBackend(); using var hotkey = new HotkeyRegistration(backend);
+    hotkey.Change(RevertHotkey.Parse(RevertHotkey.DefaultGesture), () => { }); int? old = hotkey.ActiveId;
+    try { hotkey.Change(RevertHotkey.Parse("Ctrl+Alt+Q"), () => throw new IOException("disk")); } catch (IOException) { }
+    Check(hotkey.ActiveId == old && backend.Registered.Count == 1);
+});
+Test("successful rebind ignores queued messages from previous shortcut", () => {
+    var backend = new FakeHotkeyBackend(); using var hotkey = new HotkeyRegistration(backend);
+    hotkey.Change(RevertHotkey.Parse(RevertHotkey.DefaultGesture), () => { }); int old = hotkey.ActiveId!.Value;
+    var next = RevertHotkey.Parse("Ctrl+Alt+Q"); hotkey.Change(next, () => { });
+    Check(!hotkey.Matches(old, 7, 'R') && hotkey.Matches(hotkey.ActiveId!.Value, next.Modifiers, next.VirtualKey));
+    Check(backend.Registered.Count == 1);
+});
+Test("disable and dispose unregister and remain idempotent", () => {
+    var backend = new FakeHotkeyBackend(); var hotkey = new HotkeyRegistration(backend);
+    hotkey.Change(RevertHotkey.Parse(RevertHotkey.DefaultGesture), () => { });
+    hotkey.Change(null, () => { }); Check(hotkey.ActiveId is null && backend.Registered.Count == 0);
+    hotkey.Dispose(); hotkey.Dispose();
+});
+Test("legacy settings receive a default and custom shortcut survives persistence", () => {
+    var legacy = JsonSerializer.Deserialize<AppSettings>("{}")!;
+    Check(legacy.GlobalRevertHotkeyEnabled && legacy.GlobalRevertHotkey == RevertHotkey.DefaultGesture);
+    legacy.GlobalRevertHotkey = "Ctrl+Alt+Q"; legacy.GlobalRevertHotkeyEnabled = false;
+    var restored = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(legacy))!;
+    Check(!restored.GlobalRevertHotkeyEnabled && restored.GlobalRevertHotkey == "Ctrl+Alt+Q");
+});
+Test("Revert requests during Apply coalesce and repeated Revert cannot overlap", () => {
+    var queue = new RevertRequestQueue();
+    Check(queue.Request(true) == RevertRequestDisposition.Queued);
+    Check(queue.Request(true) == RevertRequestDisposition.Queued);
+    Check(queue.TakePending() && !queue.TakePending());
+    Check(queue.Request(false) == RevertRequestDisposition.Start);
+    Check(queue.Request(true) == RevertRequestDisposition.AlreadyReverting);
+    queue.CompleteRevert(); Check(queue.Request(false) == RevertRequestDisposition.Start);
+});
+Console.WriteLine($"{passed} tests passed; no Windows display APIs were called.");
+
+sealed class FakeHotkeyBackend : IHotkeyBackend
+{
+    public bool Reject { get; set; }
+    public HashSet<int> Registered { get; } = new();
+    public bool TryRegister(int id, RevertHotkey gesture, out int error)
+    { error = Reject ? 1409 : 0; return !Reject && Registered.Add(id); }
+    public void Unregister(int id) => Registered.Remove(id);
+}

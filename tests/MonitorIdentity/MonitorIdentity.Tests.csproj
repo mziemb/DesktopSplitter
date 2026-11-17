@@ -4,6 +4,9 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../app/Models/RevertHotkey.cs" Link="RevertHotkey.cs"/>
+    <Compile Include="../../app/Services/HotkeyRegistration.cs" Link="HotkeyRegistration.cs"/>
+    <Compile Include="../../app/Services/RevertRequestQueue.cs" Link="RevertRequestQueue.cs"/>
     <Compile Include="../../app/Models/MonitorIdentityResolver.cs" Link="MonitorIdentityResolver.cs"/>
     <Compile Include="../../app/Models/MonitorInfo.cs" Link="MonitorInfo.cs"/>
     <Compile Include="../../app/Interop/EdidReader.cs" Link="EdidReader.cs"/>

@@ -155,6 +155,8 @@ public static class ApplyService
             return applied;
         }
 
+        // A global Revert request has its own queued full teardown; do not re-apply an old split first.
+        ct.ThrowIfCancellationRequested();
         log.Report("Change not confirmed — rolling back.");
         string restored = RollBackTo(snapshot, log, ct, request.SpecializationUi);
         return new ApplyResult
@@ -333,6 +335,8 @@ public static class ApplyService
             SplitActiveOnExit = true,
             ApplyOnStartup = previousSettings?.ApplyOnStartup ?? false,
             StartWithWindows = previousSettings?.StartWithWindows ?? false,
+            GlobalRevertHotkeyEnabled = previousSettings?.GlobalRevertHotkeyEnabled ?? true,
+            GlobalRevertHotkey = previousSettings?.GlobalRevertHotkey ?? RevertHotkey.DefaultGesture,
             MinimizeToTrayOnClose = previousSettings?.MinimizeToTrayOnClose ?? true,
             SpecializationHashes = previousSettings?.SpecializationHashes ?? new Dictionary<string, string>(),
             SpecializationHashRecipe = previousSettings?.SpecializationHashRecipe ?? string.Empty,

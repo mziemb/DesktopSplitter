@@ -252,6 +252,24 @@
                     </StackPanel>
                 </Border>
 
+                <TextBlock Text="GLOBAL REVERT SHORTCUT" Style="{StaticResource SectionHeader}"/>
+                <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}"
+                        BorderThickness="1" CornerRadius="4" Padding="12,10" Margin="0,0,0,16">
+                    <StackPanel>
+                        <CheckBox Content="Enable global Revert shortcut" IsChecked="{Binding RevertHotkeyEnabled}"
+                                  IsEnabled="{Binding IsIdle}"/>
+                        <DockPanel Margin="0,8,0,0">
+                            <Button DockPanel.Dock="Right" Content="Save shortcut" Margin="8,0,0,0"
+                                    Command="{Binding SaveRevertHotkeyCommand}"/>
+                            <TextBox Text="{Binding RevertHotkeyText, UpdateSourceTrigger=PropertyChanged}"
+                                     IsEnabled="{Binding IsIdle}" ToolTip="Example: Ctrl+Alt+Shift+R"/>
+                        </DockPanel>
+                        <TextBlock Text="{Binding RevertHotkeyStatus}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                        <TextBlock Text="Recommended: Ctrl+Alt+Shift+R. Win+Esc closes Windows Magnifier; Windows-key shortcuts may be reserved. Availability is checked when saving."
+                                   Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                    </StackPanel>
+                </Border>
+
                 <TextBlock Text="LAYOUT" Style="{StaticResource SectionHeader}"/>
                 <ListBox ItemsSource="{Binding Layouts}"
                          SelectedItem="{Binding SelectedLayout}"

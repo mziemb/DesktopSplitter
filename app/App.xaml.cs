@@ -9,6 +9,7 @@ namespace DesktopSplitter;
 public partial class App : Application
 {
     private TrayIconService? _tray;
+    private GlobalRevertHotkey? _revertHotkey;
     private MainViewModel? _viewModel;
     private MainWindow? _window;
     private int _teardownDone;
@@ -52,6 +53,18 @@ public partial class App : Application
         _tray.ExitRequested += (_, _) => ExitApplication();
 
         _window = new MainWindow(_viewModel, _tray);
+        try
+        {
+            _revertHotkey = new GlobalRevertHotkey();
+            _revertHotkey.Pressed += async (_, _) =>
+            {
+                if (IsExiting) return;
+                _viewModel.AppendStatus("Global shortcut requested Revert.");
+                await _viewModel.RevertAsync();
+            };
+            _viewModel.AttachRevertHotkey(_revertHotkey);
+        }
+        catch (Exception ex) { _viewModel.AppendStatus("Global Revert shortcut unavailable: " + ex.Message); }
 
         // Auto-started at logon: go straight to the tray rather than popping the window open.
         if (!LaunchedAtStartup) _window.Show();
@@ -91,6 +104,8 @@ public partial class App : Application
         IsExiting = true;
         Teardown();
 
+        _revertHotkey?.Dispose();
+        _revertHotkey = null;
         _tray?.Dispose();
         _tray = null;
         base.OnExit(e);
