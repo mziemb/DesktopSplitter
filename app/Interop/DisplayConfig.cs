@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using DesktopSplitter.Models;
+using DesktopSplitter.Services;
 using static DesktopSplitter.Interop.NativeMethods;
 
 namespace DesktopSplitter.Interop;
@@ -52,7 +53,10 @@ public static class DisplayConfig
     /// flagged with <see cref="MonitorInfo.IsDeskSplitVirtual"/> rather than dropped so
     /// the apply/revert flows can find them.
     /// </summary>
-    public static IReadOnlyList<MonitorInfo> Enumerate()
+    public static IReadOnlyList<MonitorInfo> Enumerate() => EnumerateConnected().Where(m => m.IsActive).ToList();
+
+    /// <summary>Includes connected hidden targets. Never interprets an inactive source name as a GDI address.</summary>
+    public static IReadOnlyList<MonitorInfo> EnumerateConnected()
     {
         (DISPLAYCONFIG_PATH_INFO[] paths, _) = QueryActiveConfig();
 
@@ -61,21 +65,20 @@ public static class DisplayConfig
         // One SetupDi sweep per enumeration; Enumerate() is called in a poll loop.
         IReadOnlyDictionary<string, EdidInfo> edidMap = EdidReader.BuildMap();
 
-        var byDevice = new Dictionary<string, MonitorInfo>(StringComparer.OrdinalIgnoreCase);
+        var seenTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var ordered = new List<MonitorInfo>();
 
-        foreach (DISPLAYCONFIG_PATH_INFO path in paths)
+        foreach (DISPLAYCONFIG_PATH_INFO path in paths.OrderByDescending(p => (p.flags & DISPLAYCONFIG_PATH_ACTIVE) != 0))
         {
-            if ((path.flags & DISPLAYCONFIG_PATH_ACTIVE) == 0) continue;
-
-            string gdiName = GetSourceGdiName(path);
-            if (string.IsNullOrEmpty(gdiName)) continue;
-            if (byDevice.ContainsKey(gdiName)) continue;   // clone group: first target wins
-
+            if (!path.targetInfo.targetAvailable) continue;
+            bool active = (path.flags & DISPLAYCONFIG_PATH_ACTIVE) != 0;
             TargetNameInfo target = GetTargetName(path);
+            string key = $"{path.targetInfo.adapterId.HighPart}:{path.targetInfo.adapterId.LowPart}:{path.targetInfo.id}";
+            if (!seenTargets.Add(key)) continue;
+            string gdiName = active ? GetSourceGdiName(path) : string.Empty;
             string adapterPath = GetAdapterPath(path);
 
-            ModeSurvey survey = SurveyModes(gdiName);
+            ModeSurvey survey = active ? SurveyModes(gdiName) : default;
             uint currentRefreshMhz = path.targetInfo.refreshRate.ToMillihertz();
 
             // Exact millihertz is only knowable for the mode currently in use. If the
@@ -104,6 +107,8 @@ public static class DisplayConfig
             var info = new MonitorInfo
             {
                 DeviceName = gdiName,
+                IsActive = active,
+                EdidProductCode = target.ProductCode,
                 Index = DeviceIndex(gdiName),
                 AdapterIdLow = path.targetInfo.adapterId.LowPart,
                 AdapterIdHigh = path.targetInfo.adapterId.HighPart,
@@ -132,10 +137,10 @@ public static class DisplayConfig
                 IsDeskSplitVirtual = IsOurVirtualMonitor(target, adapterPath, edid),
             };
 
-            byDevice[gdiName] = info;
             ordered.Add(info);
         }
 
+        MonitorIdentityStore.Identify(ordered);
         return ordered
             .OrderBy(m => DeviceIndex(m.DeviceName))
             .ThenBy(m => m.DeviceName, StringComparer.OrdinalIgnoreCase)
@@ -166,14 +171,14 @@ public static class DisplayConfig
         // The topology can change between the sizing call and the query call; retry.
         for (int attempt = 0; attempt < 5; attempt++)
         {
-            int rc = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, out uint pathCount, out uint modeCount);
+            int rc = GetDisplayConfigBufferSizes(QDC_ALL_PATHS, out uint pathCount, out uint modeCount);
             if (rc != ERROR_SUCCESS)
                 throw new DisplayConfigException($"GetDisplayConfigBufferSizes failed (error {rc}).");
 
             var paths = new DISPLAYCONFIG_PATH_INFO[pathCount];
             var modes = new DISPLAYCONFIG_MODE_INFO[modeCount];
 
-            rc = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
+            rc = QueryDisplayConfig(QDC_ALL_PATHS, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
             if (rc == ERROR_SUCCESS)
             {
                 Array.Resize(ref paths, (int)pathCount);
@@ -203,7 +208,7 @@ public static class DisplayConfig
     }
 
     private readonly record struct TargetNameInfo(
-        string FriendlyName, string DevicePath, string EdidManufacturer, string EdidManufacturerAlt);
+        string FriendlyName, string DevicePath, string EdidManufacturer, string EdidManufacturerAlt, int ProductCode);
 
     private static TargetNameInfo GetTargetName(DISPLAYCONFIG_PATH_INFO path)
     {
@@ -216,7 +221,7 @@ public static class DisplayConfig
         req.header.id = path.targetInfo.id;
 
         if (DisplayConfigGetDeviceInfo(ref req) != ERROR_SUCCESS)
-            return new TargetNameInfo(string.Empty, string.Empty, string.Empty, string.Empty);
+            return new TargetNameInfo(string.Empty, string.Empty, string.Empty, string.Empty, -1);
 
         ushort raw = req.edidManufactureId;
         ushort swapped = (ushort)((raw >> 8) | (raw << 8));
@@ -225,7 +230,7 @@ public static class DisplayConfig
             req.monitorFriendlyDeviceName ?? string.Empty,
             req.monitorDevicePath ?? string.Empty,
             DecodeEdidManufacturer(swapped),
-            DecodeEdidManufacturer(raw));
+            DecodeEdidManufacturer(raw), req.edidProductCodeId);
     }
 
     private static string GetAdapterPath(DISPLAYCONFIG_PATH_INFO path)

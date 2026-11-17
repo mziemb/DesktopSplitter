@@ -44,6 +44,21 @@ static bool ReadWholeFile(const std::wstring& path, std::string& out) {
     return true;
 }
 
+static bool ReadIdentity(const json::Value* value, MonitorIdentity& out) {
+    if (!value || !value->isObject()) return false;
+    out.stableMonitorId = Utf8ToWide(value->stringMember("stableMonitorId"));
+    out.monitorDevicePath = Utf8ToWide(value->stringMember("monitorDevicePath"));
+    out.adapterPath = Utf8ToWide(value->stringMember("adapterPath"));
+    out.manufacturer = Utf8ToWide(value->stringMember("manufacturer"));
+    out.productCode = value->intMember("productCode", -1);
+    out.serialNumber = value->uintMember("serialNumber", 0);
+    out.virtualAdapterId = Utf8ToWide(value->stringMember("virtualAdapterId"));
+    out.segmentIndex = value->intMember("segmentIndex", -1);
+    return !out.stableMonitorId.empty() && !out.monitorDevicePath.empty() &&
+        !out.manufacturer.empty() && out.productCode >= 0 &&
+        (out.segmentIndex < 0 || (!out.virtualAdapterId.empty() && !out.adapterPath.empty()));
+}
+
 bool LoadConfig(const std::wstring& path, AppConfig& out) {
     std::string text;
     if (!ReadWholeFile(path, text)) return false;
@@ -60,6 +75,13 @@ bool LoadConfig(const std::wstring& path, AppConfig& out) {
     }
 
     out = AppConfig();
+    if (root.intMember("identitySchemaVersion", 0) != 1 || !ReadIdentity(root.find("physicalIdentity"), out.physicalIdentity) ||
+        out.physicalIdentity.segmentIndex >= 0) {
+        DS_ERR(L"legacy/unverified monitor config: confirm the physical monitor and Apply again");
+        return false;
+    }
+    out.physicalWidth = root.uintMember("physicalWidth", 0);
+    out.physicalHeight = root.uintMember("physicalHeight", 0);
     out.physicalDevice = Utf8ToWide(root.stringMember("physicalDevice"));
     out.refreshMillihertz = root.uintMember("refreshMillihertz", 60000);
     if (out.refreshMillihertz < 1000) out.refreshMillihertz = 60000;
@@ -82,6 +104,21 @@ bool LoadConfig(const std::wstring& path, AppConfig& out) {
             return false;
         }
         SegmentConfig sc;
+        if (!ReadIdentity(s.find("identity"), sc.identity) || sc.identity.segmentIndex < 0) {
+            DS_ERR(L"segment identity is missing or unverified");
+            return false;
+        }
+        if (sc.identity.segmentIndex != static_cast<int>(i) ||
+            (!out.segments.empty() && !IdentityEqual(sc.identity.virtualAdapterId, out.segments[0].identity.virtualAdapterId))) {
+            DS_ERR(L"virtual segment index or adapter identity is inconsistent");
+            return false;
+        }
+        for (const auto& previous : out.segments) {
+            if (IdentityEqual(previous.identity.stableMonitorId, sc.identity.stableMonitorId)) {
+                DS_ERR(L"duplicate virtual logical ID");
+                return false;
+            }
+        }
         sc.virtualDevice = Utf8ToWide(s.stringMember("virtualDevice"));
         sc.width  = s.uintMember("width", 0);
         sc.height = s.uintMember("height", 0);

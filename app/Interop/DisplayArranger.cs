@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using DesktopSplitter.Models;
+using DesktopSplitter.Services;
 using static DesktopSplitter.Interop.NativeMethods;
 
 namespace DesktopSplitter.Interop;
@@ -19,14 +20,14 @@ public sealed class DisplayArrangeException : Exception
 public static class DisplayArranger
 {
     public sealed record VirtualPlacement(
-        string DeviceName, int Width, int Height, int X, int Y, int Col, int Row);
+        string DeviceName, int Width, int Height, int X, int Y, int Col, int Row, string StableMonitorId = "");
 
     /// <summary>
     /// A monitor's desired rect in virtual-desktop space. <paramref name="RefreshHz"/> of 0
     /// means "leave the current refresh rate alone".
     /// </summary>
     public sealed record MonitorPlacement(
-        string DeviceName, int Width, int Height, int X, int Y, int RefreshHz, bool IsPrimary)
+        string DeviceName, int Width, int Height, int X, int Y, int RefreshHz, bool IsPrimary, string StableMonitorId = "")
     {
         public int Right => X + Width;
         public int Bottom => Y + Height;
@@ -70,7 +71,7 @@ public static class DisplayArranger
             int y = baseY;
             for (int r = 0; r < cell.Row; r++) y += rowHeight[r];
 
-            placements.Add(new VirtualPlacement(virtualMonitors[i].DeviceName, w, h, x, y, cell.Col, cell.Row));
+            placements.Add(new VirtualPlacement(virtualMonitors[i].DeviceName, w, h, x, y, cell.Col, cell.Row, virtualMonitors[i].StableMonitorId));
         }
         return placements;
     }
@@ -93,12 +94,12 @@ public static class DisplayArranger
 
         var layout = current
             .Select(m => byName.TryGetValue(m.DeviceName, out VirtualPlacement? v)
-                ? new MonitorPlacement(v.DeviceName, v.Width, v.Height, v.X, v.Y, virtualRefreshHz, false)
-                : new MonitorPlacement(m.DeviceName, m.CurrentWidth, m.CurrentHeight, m.PositionX, m.PositionY, 0, false))
+                ? new MonitorPlacement(v.DeviceName, v.Width, v.Height, v.X, v.Y, virtualRefreshHz, false, v.StableMonitorId)
+                : new MonitorPlacement(m.DeviceName, m.CurrentWidth, m.CurrentHeight, m.PositionX, m.PositionY, 0, false, m.StableMonitorId))
             .ToList();
         layout.AddRange(placements
             .Where(v => !current.Any(m => string.Equals(m.DeviceName, v.DeviceName, StringComparison.OrdinalIgnoreCase)))
-            .Select(v => new MonitorPlacement(v.DeviceName, v.Width, v.Height, v.X, v.Y, virtualRefreshHz, false)));
+            .Select(v => new MonitorPlacement(v.DeviceName, v.Width, v.Height, v.X, v.Y, virtualRefreshHz, false, v.StableMonitorId)));
 
         return RebaseToPrimary(layout, primaryDevice);
     }
@@ -158,6 +159,10 @@ public static class DisplayArranger
             throw new DisplayArrangeException(
                 $"The primary monitor must sit at (0,0); {primary.DeviceName} is at ({primary.X},{primary.Y}).");
 
+        // Resolve every role before the first OS mutation. Also reject clone aliases.
+        var resolved = placements.Select(p => MonitorIdentityStore.Resolve(p.StableMonitorId)).ToList();
+        if (resolved.Select(m => m.DeviceName).Distinct(StringComparer.OrdinalIgnoreCase).Count() != resolved.Count)
+            throw new DisplayArrangeException("Cloned displays share one GDI source; extend the desktop first.");
         var problems = new List<string>();
 
         foreach (MonitorPlacement p in placements.OrderByDescending(p => p.IsPrimary))
@@ -193,11 +198,14 @@ public static class DisplayArranger
     public static IReadOnlyList<MonitorPlacement> SnapshotLayout(IEnumerable<MonitorInfo> monitors)
         => monitors
             .Select(m => new MonitorPlacement(
-                m.DeviceName, m.CurrentWidth, m.CurrentHeight, m.PositionX, m.PositionY, 0, m.IsPrimary))
+                m.DeviceName, m.CurrentWidth, m.CurrentHeight, m.PositionX, m.PositionY, 0, m.IsPrimary, m.StableMonitorId))
             .ToList();
 
     private static int SetPlacement(MonitorPlacement p, uint flags, bool useRefresh)
     {
+        string deviceName = MonitorIdentityStore.Resolve(p.StableMonitorId).DeviceName;
+        if (!string.Equals(deviceName, p.DeviceName, StringComparison.OrdinalIgnoreCase))
+            throw new DisplayArrangeException("Topology changed during layout staging; refresh and retry.");
         var dm = DEVMODE.Create();
         if (!EnumDisplaySettingsEx(p.DeviceName, ENUM_CURRENT_SETTINGS, ref dm, 0))
             dm = DEVMODE.Create();

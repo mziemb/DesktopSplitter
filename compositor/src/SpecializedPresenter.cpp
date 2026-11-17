@@ -1,4 +1,5 @@
 #include "SpecializedPresenter.h"
+#include "MonitorUtil.h"
 #include "Log.h"
 
 // C++/WinRT and the SDK projections are not /W4-clean and this project builds
@@ -652,7 +653,12 @@ bool SpecializedPresenter::TryAcquire(const PresenterInit& init,
     Impl& s = *m_impl;
     s.frameDeadlineSeconds = frameDeadlineSeconds;
 
-    CacheTargetIdentity(init.cfg->physicalDevice);
+    MonitorObservation resolved;
+    if (!ResolveMonitorIdentity(init.cfg->physicalIdentity, resolved, false)) {
+        out.detail = L"physical stable identity is missing or ambiguous";
+        return false;
+    }
+    s.interfacePath = resolved.identity.monitorDevicePath;
 
     const ULONGLONG start = ::GetTickCount64();
     ULONGLONG lastLog = 0;

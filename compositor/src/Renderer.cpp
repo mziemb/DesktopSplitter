@@ -1,4 +1,5 @@
 #include "Renderer.h"
+#include "MonitorUtil.h"
 #include "WindowPresenter.h"
 #include "SpecializedPresenter.h"
 #include "Log.h"
@@ -63,29 +64,23 @@ bool CompileShader(const char* entry, const char* target, ComPtr<ID3DBlob>& blob
     return true;
 }
 
-// Finds the adapter that drives 'deviceName'; falls back to adapter 0.
-bool PickAdapter(IDXGIFactory5* factory, const std::wstring& deviceName,
+// Resolve the stable target first, including a hidden target; never guess adapter zero.
+bool PickAdapter(IDXGIFactory5* factory, const MonitorIdentity& identity,
                  ComPtr<IDXGIAdapter1>& outAdapter) {
+    MonitorObservation target;
+    if (!ResolveMonitorIdentity(identity, target, false)) return false;
     for (UINT ai = 0;; ++ai) {
-        ComPtr<IDXGIAdapter1> a;
-        if (factory->EnumAdapters1(ai, &a) == DXGI_ERROR_NOT_FOUND) break;
-        for (UINT oi = 0;; ++oi) {
-            ComPtr<IDXGIOutput> o;
-            if (a->EnumOutputs(oi, &o) == DXGI_ERROR_NOT_FOUND) break;
-            DXGI_OUTPUT_DESC od = {};
-            if (FAILED(o->GetDesc(&od))) continue;
-            if (::_wcsicmp(od.DeviceName, deviceName.c_str()) == 0) {
-                outAdapter = a;
-                return true;
-            }
+        ComPtr<IDXGIAdapter1> adapter;
+        if (factory->EnumAdapters1(ai, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+        DXGI_ADAPTER_DESC1 desc = {};
+        if (FAILED(adapter->GetDesc1(&desc))) continue;
+        if (desc.AdapterLuid.LowPart == target.adapterIdLow && desc.AdapterLuid.HighPart == target.adapterIdHigh) {
+            outAdapter = adapter;
+            return true;
         }
     }
-    DS_WARN(L"physical device '%s' not matched to an adapter; using adapter 0",
-            deviceName.c_str());
-    ComPtr<IDXGIAdapter1> a0;
-    if (factory->EnumAdapters1(0, &a0) == DXGI_ERROR_NOT_FOUND) return false;
-    outAdapter = a0;
-    return true;
+    DS_ERR(L"identified physical target has no matching DXGI adapter");
+    return false;
 }
 
 } // namespace
@@ -199,7 +194,7 @@ bool Renderer::CreateDevice() {
     // Tearing support is queried by WindowPresenter, which is the only path
     // that can use it.
 
-    if (!PickAdapter(m_factory.Get(), m_cfg.physicalDevice, m_adapter)) {
+    if (!PickAdapter(m_factory.Get(), m_cfg.physicalIdentity, m_adapter)) {
         DS_ERR(L"no DXGI adapter available");
         return false;
     }
