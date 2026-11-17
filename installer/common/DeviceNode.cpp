@@ -9,42 +9,6 @@
 #pragma comment(lib, "newdev.lib")
 #pragma comment(lib, "cfgmgr32.lib")
 
-namespace
-{
-    // Does this device info element carry the given hardware ID?
-    bool HasHardwareId(HDEVINFO DevInfo, SP_DEVINFO_DATA* pDevInfoData, const wchar_t* HardwareId)
-    {
-        BYTE Buffer[2048] = {};
-        DWORD RequiredSize = 0;
-        DWORD PropertyType = 0;
-
-        if (!SetupDiGetDeviceRegistryPropertyW(
-                DevInfo,
-                pDevInfoData,
-                SPDRP_HARDWAREID,
-                &PropertyType,
-                Buffer,
-                sizeof(Buffer),
-                &RequiredSize))
-        {
-            return false;
-        }
-
-        // REG_MULTI_SZ: walk each ID in the list.
-        for (const wchar_t* Id = reinterpret_cast<const wchar_t*>(Buffer);
-             *Id != L'\0';
-             Id += wcslen(Id) + 1)
-        {
-            if (_wcsicmp(Id, HardwareId) == 0)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-}
-
 namespace DeskSplit
 {
     DWORD ListDeviceNodes(const wchar_t* HardwareId, bool PresentOnly, std::vector<DeviceNodeInfo>& Nodes)
@@ -195,41 +159,25 @@ namespace DeskSplit
         *pRemovedCount = 0;
         *pRebootRequired = false;
 
-        HDEVINFO DevInfo = SetupDiGetClassDevsW(nullptr, L"ROOT", nullptr, DIGCF_ALLCLASSES);
-        if (DevInfo == INVALID_HANDLE_VALUE)
-        {
-            return GetLastError();
+        std::vector<DeviceNodeInfo> nodes;
+        DWORD error = ListDeviceNodes(HardwareId, false, nodes);
+        if (error) return error;
+        HDEVINFO set = SetupDiCreateDeviceInfoList(&GUID_DEVCLASS_DISPLAY, nullptr);
+        if (set == INVALID_HANDLE_VALUE) return GetLastError();
+        DWORD result = ERROR_SUCCESS;
+        for (const auto& node : nodes) {
+            SP_DEVINFO_DATA data = {}; data.cbSize = sizeof(data);
+            if (!SetupDiOpenDeviceInfoW(set, node.InstanceId, nullptr, 0, &data)) { result = GetLastError(); break; }
+            if (!IsEqualGUID(data.ClassGuid, GUID_DEVCLASS_DISPLAY)) { result = ERROR_INVALID_DATA; break; }
+            BOOL reboot = FALSE;
+            if (!DiUninstallDevice(nullptr, set, &data, 0, &reboot)) { result = GetLastError(); break; }
+            ++*pRemovedCount;
+            *pRebootRequired = *pRebootRequired || reboot != FALSE;
         }
-
-        DWORD Result = ERROR_SUCCESS;
-
-        SP_DEVINFO_DATA DevInfoData = {};
-        DevInfoData.cbSize = sizeof(DevInfoData);
-
-        for (DWORD Index = 0; SetupDiEnumDeviceInfo(DevInfo, Index, &DevInfoData); ++Index)
-        {
-            if (!HasHardwareId(DevInfo, &DevInfoData, HardwareId))
-            {
-                continue;
-            }
-
-            BOOL Reboot = FALSE;
-            if (DiUninstallDevice(nullptr, DevInfo, &DevInfoData, 0, &Reboot))
-            {
-                ++(*pRemovedCount);
-                if (Reboot)
-                {
-                    *pRebootRequired = true;
-                }
-            }
-            else
-            {
-                Result = GetLastError();
-            }
-        }
-
-        SetupDiDestroyDeviceInfoList(DevInfo);
-        return Result;
+        SetupDiDestroyDeviceInfoList(set);
+        if (result || *pRebootRequired) return result;
+        error = ListDeviceNodes(HardwareId, false, nodes);
+        return error ? error : nodes.empty() ? ERROR_SUCCESS : ERROR_BUSY;
     }
 
     const wchar_t* ProblemCodeText(ULONG Problem)
