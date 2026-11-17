@@ -266,7 +266,9 @@ StageResult VerifyInstalledProduct(IStepSink* sink) {
     ExtractedPackage package = {};
     error = ExtractPayload(&package);
     if (error) return Error(error, L"Cannot extract reference package for verification");
-    wchar_t windows[MAX_PATH] = {}; GetWindowsDirectoryW(windows, ARRAYSIZE(windows));
+    wchar_t windows[MAX_PATH] = {};
+    UINT chars = GetWindowsDirectoryW(windows, ARRAYSIZE(windows));
+    if (!chars || chars >= ARRAYSIZE(windows)) return Error(chars ? ERROR_INSUFFICIENT_BUFFER : GetLastError(), L"Windows directory lookup failed");
     error = CompareFile(Join(windows, L"INF\\" + bound), package.InfPath);
     CleanupPayload(&package);
     if (error) return Error(error, L"Bound INF bytes do not match this installer; driver version is not certified");

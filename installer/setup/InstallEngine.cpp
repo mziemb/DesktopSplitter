@@ -640,7 +640,8 @@ namespace DeskSplit
         pSink->OnProgress(65);
 
         Stepf(pSink, L"Removing shortcuts and program files");
-        RemoveShortcuts();
+        DWORD cleanupError = RemoveShortcuts();
+        if (cleanupError) { ReportWin32(pSink, L"Removing shortcuts", cleanupError); return ExitUninstallFailed; }
         if (Installed)
         {
             DWORD fileError = RemoveProductFiles(InstallDir);
@@ -648,8 +649,9 @@ namespace DeskSplit
             else if (fileError) { ReportWin32(pSink, L"Removing product files", fileError); return ExitUninstallFailed; }
             Detailf(pSink, L"Removed %s", InstallDir);
         }
-        RemoveUninstallEntry();
-        RemoveProductFlags();
+        cleanupError = RemoveUninstallEntry();
+        if (!cleanupError) cleanupError = RemoveProductFlags();
+        if (cleanupError) { ReportWin32(pSink, L"Removing registration", cleanupError); return ExitUninstallFailed; }
         Detailf(pSink, L"Removed registry entries.");
         pSink->OnProgress(85);
 
@@ -682,12 +684,15 @@ namespace DeskSplit
                         const wchar_t* Stores[] = { L"Root", L"TrustedPublisher" };
                         for (const wchar_t* StoreName : Stores)
                         {
-                            if (RemoveCertificateFromStore(Summary.Sha1, StoreName) == ERROR_SUCCESS)
+                            DWORD certError = RemoveCertificateFromStore(Summary.Sha1, StoreName);
+                            if (certError == ERROR_SUCCESS)
                             {
                                 Detailf(pSink, L"Removed from LocalMachine\\%s", StoreName);
                             }
+                            else { ReportWin32(pSink, L"Removing consented publisher certificate", certError); Result = ExitUninstallFailed; }
                         }
                     }
+                    else { Errorf(pSink, L"Could not identify publisher certificate; trust stores untouched."); Result = ExitUninstallFailed; }
                     CertFreeCertificateContext(Cert);
                 }
 

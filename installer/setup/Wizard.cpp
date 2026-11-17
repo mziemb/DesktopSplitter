@@ -6,6 +6,7 @@
 
 #include <commctrl.h>
 #include <shlobj.h>
+#include <shellapi.h>
 #include <strsafe.h>
 #include <stdio.h>
 #include <process.h>

@@ -318,32 +318,19 @@ namespace DeskSplit
         return result;
     }
 
-    void RemoveShortcuts()
+    DWORD RemoveShortcuts()
     {
-        wchar_t Link[MAX_PATH] = {};
-
-        if (GetShortcutPath(CSIDL_COMMON_DESKTOPDIRECTORY, nullptr, L"DesktopSplitter.lnk", Link, ARRAYSIZE(Link)))
-        {
-            DeleteFileW(Link);
-        }
-        if (GetShortcutPath(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"DesktopSplitter.lnk", Link, ARRAYSIZE(Link)))
-        {
-            DeleteFileW(Link);
-        }
-        if (GetShortcutPath(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"Uninstall DesktopSplitter.lnk", Link, ARRAYSIZE(Link)))
-        {
-            DeleteFileW(Link);
-        }
-
-        wchar_t Folder[MAX_PATH] = {};
-        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_PROGRAMS, nullptr, SHGFP_TYPE_CURRENT, Folder)))
-        {
-            wchar_t Sub[MAX_PATH] = {};
-            if (SUCCEEDED(StringCchPrintfW(Sub, ARRAYSIZE(Sub), L"%s\\%s", Folder, kStartMenuFolder)))
-            {
-                RemoveDirectoryW(Sub);
-            }
-        }
+        wchar_t link[MAX_PATH] = {};
+        auto remove = [&](int folder, const wchar_t* sub, const wchar_t* name) -> DWORD {
+            if (!GetShortcutPath(folder, sub, name, link, ARRAYSIZE(link))) return ERROR_PATH_NOT_FOUND;
+            if (DeleteFileW(link)) return ERROR_SUCCESS;
+            DWORD error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? ERROR_SUCCESS : error;
+        };
+        DWORD error = remove(CSIDL_COMMON_DESKTOPDIRECTORY, nullptr, L"DesktopSplitter.lnk");
+        if (!error) error = remove(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"DesktopSplitter.lnk");
+        if (!error) error = remove(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"Uninstall DesktopSplitter.lnk");
+        return error;
     }
 
     _Use_decl_annotations_
@@ -386,9 +373,10 @@ namespace DeskSplit
         return ERROR_SUCCESS;
     }
 
-    void RemoveUninstallEntry()
+    DWORD RemoveUninstallEntry()
     {
-        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kUninstallRegKey, KEY_WOW64_64KEY, 0);
+        LONG error = RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kUninstallRegKey, KEY_WOW64_64KEY, 0);
+        return error == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : static_cast<DWORD>(error);
     }
 
     _Use_decl_annotations_
@@ -411,9 +399,10 @@ namespace DeskSplit
         return Error;
     }
 
-    void RemoveProductFlags()
+    DWORD RemoveProductFlags()
     {
-        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kProductRegKey, KEY_WOW64_64KEY, 0);
+        LONG error = RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kProductRegKey, KEY_WOW64_64KEY, 0);
+        return error == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : static_cast<DWORD>(error);
     }
 
     _Use_decl_annotations_

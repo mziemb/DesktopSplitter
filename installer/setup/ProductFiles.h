@@ -38,15 +38,15 @@ namespace DeskSplit
 
     // Shortcuts. Desktop = common desktop, Start menu = common programs.
     DWORD CreateShortcuts(_In_ const InstallOptions* pOptions);
-    void  RemoveShortcuts();
+    DWORD RemoveShortcuts();
 
     // Add/Remove Programs entry.
     DWORD WriteUninstallEntry(_In_ const InstallOptions* pOptions, _In_ DWORD EstimatedSizeKb);
-    void  RemoveUninstallEntry();
+    DWORD RemoveUninstallEntry();
 
     // HKLM\SOFTWARE\DesktopSplitter feature flags.
     DWORD WriteProductFlags(_In_ const InstallOptions* pOptions);
-    void  RemoveProductFlags();
+    DWORD RemoveProductFlags();
 
     // Reads the existing installation, if any. Returns false when not installed.
     bool ReadInstalledState(
