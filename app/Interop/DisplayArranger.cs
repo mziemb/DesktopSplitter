@@ -38,11 +38,11 @@ public static class DisplayArranger
     /// even when segment resolutions differ from their on-screen rects.
     /// </summary>
     public static IReadOnlyList<VirtualPlacement> ComputePlacements(
-        MonitorInfo physical,
+        MonitorPlacement physical,
         LayoutDefinition layout,
         IReadOnlyList<MonitorInfo> virtualMonitors,
         IReadOnlyList<(int Width, int Height)> resolutions,
-        IReadOnlyList<MonitorInfo> activePhysical)
+        IReadOnlyList<MonitorPlacement> activePhysical)
     {
         if (virtualMonitors.Count != layout.SegmentCount)
             throw new DisplayArrangeException(
@@ -64,25 +64,25 @@ public static class DisplayArranger
 
         var placements = PlaceToRightOf(physical);
         if (placements.Any(v => activePhysical.Any(m =>
-                v.X < m.PositionX + m.CurrentWidth && v.X + v.Width > m.PositionX &&
-                v.Y < m.PositionY + m.CurrentHeight && v.Y + v.Height > m.PositionY)))
+                v.X < m.Right && v.X + v.Width > m.X &&
+                v.Y < m.Bottom && v.Y + v.Height > m.Y)))
         {
             // The selected physical output may have a neighbor to its right. Anchor the
             // segment group to the right edge of the physical desktop in that case.
-            var rightmost = activePhysical.MaxBy(m => m.PositionX + m.CurrentWidth)!;
+            var rightmost = activePhysical.MaxBy(m => m.Right)!;
             placements = PlaceToRightOf(rightmost);
         }
         return placements;
 
-        List<VirtualPlacement> PlaceToRightOf(MonitorInfo anchor)
+        List<VirtualPlacement> PlaceToRightOf(MonitorPlacement anchor)
         {
             var result = new List<VirtualPlacement>(layout.SegmentCount);
             for (int i = 0; i < layout.SegmentCount; i++)
             {
                 LayoutCell cell = layout.Cells[i];
                 (int width, int height) = resolutions[i];
-                int x = anchor.PositionX + anchor.CurrentWidth + columnOffsets[cell.Col];
-                int y = anchor.PositionY + rowOffsets[cell.Row];
+                int x = anchor.Right + columnOffsets[cell.Col];
+                int y = anchor.Y + rowOffsets[cell.Row];
                 MonitorInfo monitor = virtualMonitors[i];
                 result.Add(new VirtualPlacement(monitor.DeviceName, width, height, x, y,
                     cell.Col, cell.Row, monitor.StableMonitorId));
@@ -93,21 +93,28 @@ public static class DisplayArranger
 
     /// <summary>
     /// The whole desktop as it should look once the split is up: every monitor that is not one
-    /// of <paramref name="placements"/> keeps its current rect, the virtual monitors take theirs,
+    /// of <paramref name="placements"/> keeps its rect from before virtual enumeration,
     /// and everything is re-based so <paramref name="primaryDevice"/> is primary at the origin.
     /// Pure function: no display APIs are called.
     /// </summary>
     public static IReadOnlyList<MonitorPlacement> ComposeLayout(
         IReadOnlyList<MonitorInfo> current,
         IReadOnlyList<VirtualPlacement> placements,
+        IReadOnlyList<MonitorPlacement> physicalBefore,
         string primaryDevice)
     {
-        var byIdentity = placements.ToDictionary(p => p.StableMonitorId);
+        var segments = placements.ToDictionary(p => p.StableMonitorId);
+        var physical = physicalBefore.ToDictionary(p => p.StableMonitorId);
+        if (!current.Where(m => !m.IsDeskSplitVirtual).Select(m => m.StableMonitorId)
+                    .ToHashSet().SetEquals(physical.Keys))
+            throw new DisplayArrangeException("The physical display set changed during Apply.");
 
         var layout = SnapshotLayout(current)
-            .Select(p => byIdentity.TryGetValue(p.StableMonitorId, out VirtualPlacement? v)
+            .Select(p => segments.TryGetValue(p.StableMonitorId, out VirtualPlacement? v)
                 ? p with { Width = v.Width, Height = v.Height, X = v.X, Y = v.Y }
-                : p)
+                : physical.TryGetValue(p.StableMonitorId, out MonitorPlacement? saved)
+                    ? saved with { DeviceName = p.DeviceName }
+                    : throw new DisplayArrangeException($"Unexpected display {p.DeviceName} during Apply."))
             .ToList();
 
         return RebaseToPrimary(layout, primaryDevice);

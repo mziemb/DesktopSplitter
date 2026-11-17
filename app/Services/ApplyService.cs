@@ -228,8 +228,10 @@ public static class ApplyService
         }
 
         ClearSpecializationIfOurs(log, request.SpecializationUi, ct);
-        physical = MonitorIdentityStore.Resolve(physical.StableMonitorId);
-        _ = MonitorIdentityStore.Resolve(previousPrimaryId);
+        var physicalBefore = DisplayConfig.EnumeratePhysical();
+        physical = MonitorIdentityResolver.Resolve(physical.StableMonitorId, physicalBefore);
+        _ = MonitorIdentityResolver.Resolve(previousPrimaryId, physicalBefore);
+        var physicalLayout = DisplayArranger.SnapshotLayout(physicalBefore);
 
         // a. Build and send DESKSPLIT_CONFIG.
         DESKSPLIT_CONFIG cfg = DriverClient.NewConfig();
@@ -280,13 +282,13 @@ public static class ApplyService
         // Arrange in one topology and choose the primary by stable identity.
         log.Report("Arranging virtual monitors in the virtual desktop...");
         IReadOnlyList<MonitorInfo> current = DisplayConfig.Enumerate();
-        MonitorInfo physicalNow = MonitorIdentityResolver.Resolve(physical.StableMonitorId, current);
         virtualMonitors = virtualMonitors.Select(v => MonitorIdentityResolver.Resolve(v.StableMonitorId, current)).ToList();
         string appliedPrimaryId = recovery.AppliedPrimary(physical.StableMonitorId, virtualMonitors, request.PrimarySegmentIndex);
         MonitorInfo desiredPrimary = MonitorIdentityResolver.Resolve(appliedPrimaryId, current);
-        var placements = DisplayArranger.ComputePlacements(physicalNow, layout, virtualMonitors, request.Resolutions,
-            current.Where(m => !m.IsDeskSplitVirtual).ToList());
-        DisplayArranger.ApplyLayout(current, DisplayArranger.ComposeLayout(current, placements, desiredPrimary.DeviceName),
+        var anchor = physicalLayout.Single(m => m.StableMonitorId == physical.StableMonitorId);
+        var placements = DisplayArranger.ComputePlacements(anchor, layout, virtualMonitors, request.Resolutions, physicalLayout);
+        DisplayArranger.ApplyLayout(current,
+            DisplayArranger.ComposeLayout(current, placements, physicalLayout, desiredPrimary.DeviceName),
             log.Report);
 
         var arranged = DisplayConfig.Enumerate();

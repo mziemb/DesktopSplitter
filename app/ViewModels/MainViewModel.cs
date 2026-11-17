@@ -394,9 +394,12 @@ public sealed class MainViewModel : ObservableObject
 
     public bool IsIdle => !_isBusy;
 
+    private string? _ownedHiddenMonitorId;
+
     public bool CanApply =>
         !IsBusy &&
-        SelectedMonitor is not null && SelectedMonitor.IsActive &&
+        SelectedMonitor is not null &&
+        (SelectedMonitor.IsActive || SelectedMonitor.StableMonitorId == _ownedHiddenMonitorId) &&
         !string.IsNullOrEmpty(SelectedMonitor.StableMonitorId) &&
         SelectedLayout is not null &&
         Segments.Count == SelectedLayout.SegmentCount &&
@@ -427,6 +430,7 @@ public sealed class MainViewModel : ObservableObject
         string? previous = SelectedMonitor?.StableMonitorId;
         try
         {
+            _ownedHiddenMonitorId = SettingsStore.Load()?.SpecializedStableMonitorId;
             IReadOnlyList<MonitorInfo> physical = DisplayConfig.EnumerateConnected().Where(m => !m.IsDeskSplitVirtual).ToList();
 
             Monitors.Clear();

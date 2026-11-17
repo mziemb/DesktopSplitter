@@ -9,20 +9,21 @@ internal static class PrimaryPreservationTests
         var main = Screen("main", 1, x: 0, y: 0, primary: true);
         var side = Screen("side", 2, x: 1920, y: -240, rotation: 2);
         MonitorInfo[] physical = [main, side];
+        var physicalLayout = DisplayArranger.SnapshotLayout(physical);
         MonitorInfo[] segments = [Screen("segment-1", 7, virtualDisplay: true), Screen("segment-2", 8, virtualDisplay: true)];
         var secondarySplit = DisplayRecoverySnapshot.Capture(physical, "side");
         var primarySplit = DisplayRecoverySnapshot.Capture(physical, "main");
 
         test("Apply on a secondary display preserves the physical primary at the origin", () =>
         {
-            var current = physical.Concat(segments).ToArray();
+            MonitorInfo[] current = [Screen("main", 3, x: -2000), Screen("side", 2, primary: true), .. segments];
             var layout = LayoutDefinition.FromKind(LayoutKind.TwoVertical);
-            var virtualLayout = DisplayArranger.ComputePlacements(side, layout, segments, [(960, 1080), (960, 1080)], physical);
+            var virtualLayout = DisplayArranger.ComputePlacements(physicalLayout[1], layout, segments, [(960, 1080), (960, 1080)], physicalLayout);
             string id = secondarySplit.AppliedPrimary("side", segments, primarySegment: 1);
-            var desired = DisplayArranger.ComposeLayout(current, virtualLayout,
+            var desired = DisplayArranger.ComposeLayout(current, virtualLayout, physicalLayout,
                 MonitorIdentityResolver.Resolve(id, current).DeviceName);
             check(!secondarySplit.SplitWasPrimary && id == "main");
-            check(desired.Single(p => p.IsPrimary) is { X: 0, Y: 0 } p && p.DeviceName == main.DeviceName);
+            check(desired.Single(p => p.IsPrimary) is { X: 0, Y: 0 } p && p.DeviceName == current[0].DeviceName);
             check(desired.Single(p => p.DeviceName == side.DeviceName) is { X: 1920, Y: -240, Rotation: 2 });
         });
 
@@ -30,11 +31,11 @@ internal static class PrimaryPreservationTests
         {
             var current = physical.Concat(segments).ToArray();
             var layout = LayoutDefinition.FromKind(LayoutKind.TwoVertical);
-            var virtualLayout = DisplayArranger.ComputePlacements(main, layout, segments, [(960, 1080), (960, 1080)], physical);
+            var virtualLayout = DisplayArranger.ComputePlacements(physicalLayout[0], layout, segments, [(960, 1080), (960, 1080)], physicalLayout);
             check(virtualLayout[0].X == side.PositionX + side.CurrentWidth);
             check(primarySplit.SplitWasPrimary && primarySplit.AppliedPrimary("main", segments, 0) == "segment-1");
             var id = primarySplit.AppliedPrimary("main", segments, 1);
-            var desired = DisplayArranger.ComposeLayout(current, virtualLayout,
+            var desired = DisplayArranger.ComposeLayout(current, virtualLayout, physicalLayout,
                 MonitorIdentityResolver.Resolve(id, current).DeviceName);
             check(desired.Single(p => p.IsPrimary) is { X: 0, Y: 0 } p && p.DeviceName == segments[1].DeviceName);
             check(desired[1].X - desired[0].X == side.PositionX && desired[1].Y - desired[0].Y == side.PositionY);
