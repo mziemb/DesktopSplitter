@@ -768,7 +768,7 @@ public sealed class MainViewModel : ObservableObject
             Layout = layout,
             Resolutions = resolutions,
             HidePhysicalDisplay = Hiding.IntentOn,
-            SpecializationUi = Hiding.CreateSpecializationUi(() => Monitors.ToList()),
+            SpecializationUi = Hiding.CreateSpecializationUi(() => Monitors.Where(m => m.IsActive).ToList()),
             PromptToConfirm = promptToConfirm,
             Confirmer = _applyConfirmer,
         };

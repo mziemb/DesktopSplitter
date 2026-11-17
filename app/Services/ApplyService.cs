@@ -224,6 +224,7 @@ public static class ApplyService
                    $"for {segmentCount} monitor(s) at {physical.MaxRefreshMillihertz} mHz...");
         try
         {
+            physical = MonitorIdentityStore.Resolve(physical.StableMonitorId);
             DriverClient.SetConfig(cfg);
         }
         catch (DriverNotFoundException ex)
@@ -488,6 +489,7 @@ public static class ApplyService
         log.Report("Sending IOCTL_DESKSPLIT_SET_CONFIG with MonitorCount = 0...");
         try
         {
+            _ = MonitorIdentityStore.Resolve(state.PhysicalStableMonitorId);
             DriverClient.ClearConfig();
         }
         catch (DriverNotFoundException ex)

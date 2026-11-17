@@ -41,7 +41,6 @@ public:
     // while the display is still on the desktop - once it is specialized it
     // disappears from EnumDisplayDevices and can no longer be resolved by GDI
     // device name.
-    bool CacheTargetIdentity(const std::wstring& gdiDeviceName);
 
     bool Initialize(const PresenterInit& init) override;
     void Shutdown() override;
@@ -65,9 +64,5 @@ private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
 };
-
-// Resolves a GDI device name ("\\.\DISPLAY1") to the monitor device interface
-// path Display.Core reports as DisplayMonitor.DeviceId. Empty on failure.
-std::wstring MonitorInterfacePathForDevice(const std::wstring& gdiDeviceName);
 
 } // namespace ds
