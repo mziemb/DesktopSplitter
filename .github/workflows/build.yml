@@ -72,6 +72,31 @@ jobs:
           Push-Location $out
           try { & cmd.exe /c compile.cmd; if ($LASTEXITCODE -ne 0) { throw "Installer compiler/linker failed: $LASTEXITCODE" } }
           finally { Pop-Location }
+      - name: Test Windows file replacement and rollback (temporary files only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+          $out = Join-Path $root 'work/installer-compile'
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $sources = @(Get-ChildItem installer/setup -Filter '*.cpp' | Where-Object Name -ne 'Setup.cpp' | ForEach-Object { '"' + $_.FullName + '"' })
+          $sources += '"' + (Join-Path $root 'installer/common/DeviceNode.cpp') + '"'
+          $sources += '"' + (Join-Path $root 'compositor/src/Json.cpp') + '"'
+          $sources += '"' + (Join-Path $root 'tests/Installer/FileMaintenanceTests.cpp') + '"'
+          $cmd = @(
+            '@echo off',
+            ('call "' + $vs + '\Common7\Tools\VsDevCmd.bat" -arch=x64 >nul'),
+            ('cl /nologo /std:c++17 /EHsc /W4 /WX /utf-8 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"' + $out + '" /I"' + $root + '\shared" ' + ($sources -join ' ') + ' /Fe:file-maintenance-tests.exe /link /SUBSYSTEM:CONSOLE setupapi.lib newdev.lib cfgmgr32.lib wintrust.lib crypt32.lib comctl32.lib shell32.lib ole32.lib oleaut32.lib advapi32.lib user32.lib gdi32.lib')
+          )
+          $cmd | Set-Content (Join-Path $out 'file-tests.cmd') -Encoding ascii
+          Push-Location $out
+          try {
+            & cmd.exe /c file-tests.cmd
+            if ($LASTEXITCODE -ne 0) { throw "File test compilation failed: $LASTEXITCODE" }
+            & .\file-maintenance-tests.exe
+            if ($LASTEXITCODE -ne 0) { throw "File maintenance tests failed: $LASTEXITCODE" }
+          } finally { Pop-Location }
   build:
     runs-on: windows-2022
     timeout-minutes: 90

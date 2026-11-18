@@ -202,7 +202,7 @@ namespace
             L"  /keeptemp     keep the unpacked driver package for diagnostics\n"
             L"\n"
             L"Exit codes:\n"
-            L"   3010 restart required; run /verify-installed after reboot\n"
+            L"   3010 restart required; after install verify runtime, after removal restart before reinstall\n"
             L"   0 success                    7 certificate installation failed\n"
             L"   1 bad command line           8 driver package installation failed\n"
             L"   2 not elevated               9 device node creation failed\n"
@@ -210,7 +210,8 @@ namespace
             L"   4 package extraction failed 11 uninstall failed\n"
             L"   5 catalog unusable          12 copying program files failed\n"
             L"   6 trust declined by user    13 cancelled\n"
-            L"  14 registration failed       15 durable log unavailable/failed\n");
+            L"  14 registration failed       15 durable log unavailable/failed\n"
+            L"  16 previous removal pending; restart before installation\n");
     }
 
     // ---- /verify ----------------------------------------------------------
@@ -463,7 +464,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR, 
             Result = RunInstallSequence(&Options, &Sink);
         }
 
-        Out(L"\n%s (exit %d)\n", Result == ExitSuccess ? L"Verified ready." : Result == ExitRestartRequired ? L"Restart required; verification pending." : L"Failed / incomplete.", Result);
+        const wchar_t* summary = Result == ExitSuccess ? (WantUninstall ? L"Removal complete." : L"Verified ready.")
+            : Result == ExitRestartRequired ? (WantUninstall ? L"Removal pending restart; restart before reinstalling." : L"Restart required; verification pending.")
+            : Result == ExitPendingRemoval ? L"Previous removal pending; restart before installation. Installation was not performed."
+            : L"Failed / incomplete.";
+        Out(L"\n%s (exit %d)\n", summary, Result);
         return Result;
     }
 

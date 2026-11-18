@@ -363,6 +363,10 @@ namespace DeskSplit
                     return error ? StageResult::Fail(error, L"Extracting driver payload failed") : StageResult::Pass();
                 }
                 case InstallStage::Preflight: {
+                    DWORD pending = CheckPendingProductRemoval(options->InstallDir, &log);
+                    if (pending) return StageResult::Fail(pending, pending == ERROR_SUCCESS_REBOOT_REQUIRED
+                        ? L"Previous removal is pending. Restart Windows before installation; no driver or product files were changed."
+                        : L"Cannot inspect pending product removal; installation stopped before driver changes");
                     wchar_t dir[MAX_PATH] = {}, version[64] = {};
                     if (ReadInstalledState(dir, ARRAYSIZE(dir), version, ARRAYSIZE(version))) {
                         log.OnDetail((L"Previous installation: " + std::wstring(dir) + L" version=" + version).c_str());
@@ -430,7 +434,7 @@ namespace DeskSplit
                     log.OnDetail((L"Product file recovery directory: " + backup).c_str()); return result;
                 }
                 case InstallStage::Files: {
-                    DWORD error = InstallProductFiles(options->InstallDir, &bytes);
+                    DWORD error = InstallProductFiles(options->InstallDir, &bytes, &log);
                     return error ? StageResult::Fail(error, L"Product file copy failed (installer exit 12 is not PnP Code 12)") : StageResult::Pass();
                 }
                 case InstallStage::FilesVerify: return VerifyProductFiles(options->InstallDir);
@@ -455,7 +459,7 @@ namespace DeskSplit
             }
             StageResult RestoreFiles() override {
                 log.OnStep(L"Rollback of product files only");
-                auto result = RestoreProductBackup(options->InstallDir, backup);
+                auto result = RestoreProductBackup(options->InstallDir, backup, &log);
                 if (!result.ok) Detailf(&log, L"ROLLBACK FAILED Win32=0x%08X %s", result.code, result.detail.c_str());
                 else log.OnDetail(L"Previous product bytes restored; driver bindings and partial registration are not automatically rolled back.");
                 return result;
@@ -480,6 +484,7 @@ namespace DeskSplit
             log.OnDetail(L"Nie ustalono przyczyny, unless the explicit API evidence above identifies it. Keep the log and the matching timestamp/instance entries in setupapi.dev.log. Old driver packages and user settings were retained.");
             switch (result.stage) {
             case InstallStage::Admin: return ExitNotElevated;
+            case InstallStage::Preflight: return result.result.code == ERROR_SUCCESS_REBOOT_REQUIRED ? ExitPendingRemoval : ExitVerificationFailed;
             case InstallStage::Payload: return ExitPayloadExtractFailed;
             case InstallStage::Trust: return ExitCatalogUnusable;
             case InstallStage::DriverStore: return ExitDriverInstallFailed;
@@ -644,10 +649,12 @@ namespace DeskSplit
         if (cleanupError) { ReportWin32(pSink, L"Removing shortcuts", cleanupError); return ExitUninstallFailed; }
         if (Installed)
         {
-            DWORD fileError = RemoveProductFiles(InstallDir);
+            DWORD fileError = RemoveProductFiles(InstallDir, pSink);
             if (fileError == ERROR_SUCCESS_REBOOT_REQUIRED) RebootRequired = TRUE;
             else if (fileError) { ReportWin32(pSink, L"Removing product files", fileError); return ExitUninstallFailed; }
-            Detailf(pSink, L"Removed %s", InstallDir);
+            Detailf(pSink, fileError == ERROR_SUCCESS_REBOOT_REQUIRED
+                ? L"Removed product files; running setup/empty-directory cleanup pending restart: %s"
+                : L"Known product files removed from %s; unrelated files, if any, retained.", InstallDir);
         }
         cleanupError = RemoveUninstallEntry();
         if (!cleanupError) cleanupError = RemoveProductFlags();
@@ -704,6 +711,10 @@ namespace DeskSplit
         }
 
         pSink->OnProgress(100);
+        if (Result == ExitSuccess) persistent.OnDetail(RebootRequired
+            ? L"FINAL RESULT: REMOVAL PENDING RESTART (exit 3010). Restart Windows before reinstalling. Do not run /verify-installed after removal."
+            : L"FINAL RESULT: REMOVAL COMPLETE (exit 0).");
+        else persistent.OnError(L"FINAL RESULT: REMOVAL INCOMPLETE. Partial changes may remain; retain this log.");
         if (!persistent.Healthy()) return ExitLogFailed;
         return Result == ExitSuccess && RebootRequired ? ExitRestartRequired : Result;
     }

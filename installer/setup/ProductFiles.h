@@ -16,6 +16,10 @@ namespace DeskSplit
     extern const wchar_t kPublisher[];
     extern const wchar_t kProductVersion[];
 
+    struct IStepSink;
+    DWORD PrepareProductFile(const wchar_t* Path, IStepSink* Sink = nullptr);
+    DWORD CheckPendingProductRemoval(const wchar_t* InstallDir, IStepSink* Sink);
+
     struct InstallOptions
     {
         wchar_t InstallDir[MAX_PATH];
@@ -34,7 +38,7 @@ namespace DeskSplit
     // Writes DesktopSplitter.exe, dscomp.exe, devcreate.exe and the compositor
     // README into InstallDir, and copies this setup executable in as
     // DesktopSplitterSetup.exe so uninstall works without the original file.
-    DWORD InstallProductFiles(_In_z_ const wchar_t* InstallDir, _Out_ DWORD* pBytesWritten);
+    DWORD InstallProductFiles(_In_z_ const wchar_t* InstallDir, _Out_ DWORD* pBytesWritten, IStepSink* Sink = nullptr);
 
     // Shortcuts. Desktop = common desktop, Start menu = common programs.
     DWORD CreateShortcuts(_In_ const InstallOptions* pOptions);
@@ -55,7 +59,7 @@ namespace DeskSplit
 
     // Deletes the installed files and the install directory. The running setup
     // copy inside InstallDir is scheduled for delete-on-reboot if it is us.
-    DWORD RemoveProductFiles(_In_z_ const wchar_t* InstallDir);
+    DWORD RemoveProductFiles(_In_z_ const wchar_t* InstallDir, IStepSink* Sink = nullptr);
 
     // Upgrade path: exact executable path + current session, graceful only, bounded wait.
     DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount);

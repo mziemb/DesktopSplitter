@@ -29,6 +29,7 @@ namespace DeskSplit
         ExitCancelled = 13,
         ExitRegistrationFailed = 14,
         ExitLogFailed = 15,
+        ExitPendingRemoval = 16,
         ExitRestartRequired = 3010,
     };
 

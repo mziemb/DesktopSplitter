@@ -191,3 +191,41 @@ Limits requiring real Windows 11 acceptance:
   not guess which instance should be deleted.
 - The actual reported Code 12 remains unconfirmed until machine evidence is
   available, including whether the observed 12 was PnP, installer or child exit.
+
+## Follow-up: ReadOnly files and removal pending restart
+
+The supplied Windows log confirmed successful PnP/GET_STATUS verification followed
+by Win32 5 during file copying and failure to restore DesktopSplitterSetup.exe.
+The user confirmed that this file had ReadOnly set and that reinstalling after a
+restart succeeds. The uninstall log and screenshot confirmed exit 3010 with an
+incorrect installation-specific instruction. These observations do not establish
+which process, if any, held a file open during the initial failure.
+
+- Known product files have only ReadOnly cleared before replacement/deletion;
+  other attributes and ACLs are preserved. Attributes copied from the setup source
+  or backup do not leave the installed setup ReadOnly again. Directories and
+  reparse points are rejected as product files.
+- Copy failures name the target file, and setup replacement also logs its source.
+- Rollback compares old and current bytes first. Unchanged files, including a
+  running setup, are not needlessly overwritten. Changed locked files still fail
+  explicitly; no process is forcibly killed to complete rollback.
+- Uninstall logs the exact running setup scheduled for deletion after restart.
+  Empty install-directory cleanup is also scheduled; Windows never recursively
+  deletes unrelated files. The final result distinguishes removal complete from
+  removal pending restart. GUI and console instruct restart before reinstalling,
+  without telling users to verify an uninstalled product. Finish strings use ASCII
+  punctuation to avoid the mojibake observed in the screenshot.
+- Before staging/binding a driver, installation reads (never edits) Windows'
+  PendingFileRenameOperations and checks exact known product paths for scheduled
+  deletion. If matched, exit 16 blocks installation and asks for restart. This
+  avoids reinstalling a file that Windows would delete at the next boot. Unrelated
+  system reboot requests do not block this product. Unknown/unreadable pending
+  operations stop installation conservatively.
+
+Regression validation includes portable production-policy/message/pending-pair
+checks and Windows temporary-file tests for ReadOnly replacement/removal, backup
+attributes, unchanged locked files, changed locked failures, and preserving user
+files. These tests do not invoke installation, PnP, delayed deletion or registry
+writes. Acceptance on Windows 11: uninstall from the installed setup, confirm 3010
+and the removal-specific message, attempt reinstall before restart (exit 16 before
+PnP), restart, then reinstall and run final verification. Keep logs for each step.

@@ -234,20 +234,29 @@ StageResult BackUpProductFiles(const wchar_t* directory, std::wstring& backup) {
     }
     return StageResult::Pass();
 }
-StageResult RestoreProductBackup(const wchar_t* directory, const std::wstring& backup) {
+StageResult RestoreProductBackup(const wchar_t* directory, const std::wstring& backup, IStepSink* sink) {
     if (backup.empty()) return Error(ERROR_PATH_NOT_FOUND, L"No verified backup exists");
     for (const auto* name : files) {
         auto from = Join(backup, name), to = Join(directory, name);
         DWORD attr = GetFileAttributesW(from.c_str());
         if (attr == INVALID_FILE_ATTRIBUTES) {
             DWORD error = GetLastError(); if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) return Error(error, L"Cannot inspect backup");
+            DWORD prepared = PrepareProductFile(to.c_str(), sink);
+            if (prepared) return Error(prepared, L"Cannot prepare new product file for removal: " + to);
             if (!DeleteFileW(to.c_str())) {
                 DWORD deleteError = GetLastError();
                 if (deleteError != ERROR_FILE_NOT_FOUND && deleteError != ERROR_PATH_NOT_FOUND) return Error(deleteError, L"Cannot remove newly created product file: " + to);
             }
         } else {
+            if (CompareFile(to, from) == ERROR_SUCCESS) {
+                if (sink) sink->OnDetail((L"Rollback: original bytes already present, no overwrite needed: " + to).c_str());
+                continue; // In particular, never overwrite an unchanged running setup.
+            }
+            DWORD prepared = PrepareProductFile(to.c_str(), sink);
+            if (prepared) return Error(prepared, L"Cannot prepare product file for restore: " + to);
             if (!CopyFileW(from.c_str(), to.c_str(), FALSE)) return Error(GetLastError(), L"Cannot restore " + to);
-            DWORD error = CompareFile(to, from); if (error) return Error(error, L"Restored bytes do not match backup");
+            DWORD error = PrepareProductFile(to.c_str(), sink);
+            if (!error) error = CompareFile(to, from); if (error) return Error(error, L"Restored bytes do not match backup");
         }
     }
     return StageResult::Pass();

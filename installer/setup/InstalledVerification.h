@@ -9,7 +9,7 @@ StageResult VerifyInstalledDriver(const wchar_t* expectedInf, bool reboot, IStep
 StageResult VerifyProductFiles(const wchar_t* directory);
 StageResult CheckUpgradeState(const wchar_t* directory, IStepSink* sink);
 StageResult BackUpProductFiles(const wchar_t* directory, std::wstring& backup);
-StageResult RestoreProductBackup(const wchar_t* directory, const std::wstring& backup);
+StageResult RestoreProductBackup(const wchar_t* directory, const std::wstring& backup, IStepSink* sink = nullptr);
 StageResult VerifyInstalledProduct(IStepSink* sink);
 DWORD BoundInfName(const DeviceNodeInfo& node, std::wstring& name);
 }

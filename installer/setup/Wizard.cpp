@@ -1,5 +1,6 @@
 #include "Wizard.h"
 #include "InstallEngine.h"
+#include "FileMaintenancePolicy.h"
 #include "Edition.h"
 #include "Payload.h"
 #include "resource.h"
@@ -131,7 +132,8 @@ namespace
         case WizardPage::Options:  return Un ? L"Removal options" : L"Installation options";
         case WizardPage::Progress: return Un ? L"Removing" : L"Installing";
         case WizardPage::Finish:
-            if (W->Result == ExitRestartRequired) return L"Restart required — verification pending";
+            if (W->Result == ExitRestartRequired) return RestartFinishTitle(Un);
+            if (W->Result == ExitPendingRemoval) return L"Restart required before installation";
             if (W->Result != ExitSuccess) return L"Setup did not complete";
             return Un ? L"Removal complete" : L"Installation verified";
         default:                   return L"";
@@ -151,7 +153,8 @@ namespace
         case WizardPage::Progress:
             return L"This can take a minute. Your screen may flicker.";
         case WizardPage::Finish:
-            if (W->Result == ExitRestartRequired) return L"The driver is not certified ready; restart and verify again.";
+            if (W->Result == ExitRestartRequired) return RestartFinishSubtitle(Un);
+            if (W->Result == ExitPendingRemoval) return L"Previous removal is pending; installation was not performed.";
             if (W->Result != ExitSuccess) return L"A mandatory stage failed. Review the diagnostic log.";
             return Un ? L"DesktopSplitter has been removed." : L"DesktopSplitter passed installation verification.";
         default:
@@ -367,9 +370,8 @@ namespace
             }
             else if (W->Result == ExitRestartRequired)
             {
-                StringCchPrintfW(Text, ARRAYSIZE(Text),
-                    L"Restart required (exit 3010). The driver is NOT certified ready.\r\n\r\n"
-                    L"After restart, run DesktopSplitterSetup.exe /verify-installed before Apply.\r\n\r\nLog: %s", W->LogPath.c_str());
+                StringCchPrintfW(Text, ARRAYSIZE(Text), L"%s\r\n\r\nLog: %s",
+                    RestartFinishInstructions(W->Mode == WizardMode::Uninstall), W->LogPath.c_str());
             }
             else
             {

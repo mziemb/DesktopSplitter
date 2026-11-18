@@ -1,4 +1,5 @@
 #include "../../installer/setup/InstallPolicy.h"
+#include "../../installer/setup/FileMaintenancePolicy.h"
 #include <iostream>
 #include <stdexcept>
 #include <functional>
@@ -52,6 +53,47 @@ int main() {
     test("cancellation cannot return an uninitialized success", [] { MockBackend b; b.cancel = true; Check(ExecuteInstall(b).state == InstallState::Failed && b.calls.empty()); });
     test("every mandatory stage failure prevents ready", [] {
         for (int i = 0; i < 12; ++i) { MockBackend b; b.failAt = static_cast<InstallStage>(i); auto r = ExecuteInstall(b); Check(r.state == InstallState::Failed && r.stage == b.failAt && b.calls.size() == static_cast<size_t>(i + 1)); }
+    });
+    test("pending product deletion blocks before driver or file changes", [] {
+        MockBackend b; b.failAt = InstallStage::Preflight; b.failure = StageResult::Fail(3010, L"pending removal");
+        auto r = ExecuteInstall(b); Check(r.state == InstallState::Failed && !r.partial && !r.restart && b.calls.size() == 3);
+    });
+    test("pending deletion matches exact native path ignoring case", [] {
+        std::wstring match;
+        Check(HasPendingProductDeletion({L"\\??\\C:\\Program Files\\DesktopSplitter\\DesktopSplitterSetup.exe", L""},
+            {L"c:\\program files\\desktopsplitter\\desktopsplittersetup.exe"}, match));
+    });
+    test("unrelated reboot operations do not block this product", [] {
+        std::wstring match;
+        Check(!HasPendingProductDeletion({L"C:\\Other\\setup.exe", L"", L"C:\\Product-old\\setup.exe", L""}, {L"C:\\Product\\setup.exe"}, match));
+    });
+    test("rename is not mistaken for pending deletion", [] {
+        std::wstring match;
+        Check(!HasPendingProductDeletion({L"C:\\Product\\setup.exe", L"C:\\Product\\old.exe"}, {L"C:\\Product\\setup.exe"}, match));
+    });
+    test("multiple deletion pairs include empty destinations", [] {
+        std::wstring match;
+        Check(HasPendingProductDeletion({L"C:\\Other", L"", L"C:\\Product", L""}, {L"C:\\Product"}, match));
+    });
+    test("uninstall restart instructions never request verification or Apply", [] {
+        std::wstring text = RestartFinishInstructions(true);
+        Check(text.find(L"verify-installed") == std::wstring::npos && text.find(L"Apply") == std::wstring::npos);
+        Check(text.find(L"before installing") != std::wstring::npos);
+        Check(std::wstring(RestartFinishTitle(true)).find(L"removal") != std::wstring::npos);
+    });
+    test("installation restart instructions retain runtime verification", [] {
+        Check(std::wstring(RestartFinishInstructions(false)).find(L"/verify-installed") != std::wstring::npos);
+    });
+    test("raw pending registry pairs preserve empty delete destinations", [] {
+        const wchar_t raw[] = L"C:\\other\0\0C:\\product\0\0";
+        std::vector<std::wstring> pairs;
+        Check(ParsePendingRenamePairs(std::vector<wchar_t>(raw, raw + sizeof(raw) / sizeof(wchar_t)), pairs));
+        Check(pairs.size() == 4 && pairs[1].empty() && pairs[2] == L"C:\\product" && pairs[3].empty());
+    });
+    test("malformed pending operations cannot be interpreted as clean", [] {
+        std::vector<std::wstring> pairs;
+        Check(!ParsePendingRenamePairs({L'c', L':', L'\\', 0}, pairs));
+        Check(!ParsePendingRenamePairs({0, L'x', 0}, pairs));
     });
     std::cout << count << " installer policy tests passed; no PnP or installation APIs invoked\n";
 }

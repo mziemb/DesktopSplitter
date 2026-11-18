@@ -1,4 +1,6 @@
 #include "ProductFiles.h"
+#include "InstallEngine.h"
+#include "FileMaintenancePolicy.h"
 #include <vector>
 #include <string>
 #include "Payload.h"
@@ -229,8 +231,59 @@ namespace DeskSplit
         return GetLastError();
     }
 
+    DWORD PrepareProductFile(const wchar_t* Path, IStepSink* Sink)
+    {
+        DWORD attributes = GetFileAttributesW(Path);
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            DWORD error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? ERROR_SUCCESS : error;
+        }
+        if (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) return ERROR_ACCESS_DENIED;
+        if (attributes & FILE_ATTRIBUTE_READONLY) {
+            DWORD writable = attributes & ~FILE_ATTRIBUTE_READONLY;
+            if (!writable) writable = FILE_ATTRIBUTE_NORMAL;
+            if (!SetFileAttributesW(Path, writable)) {
+                DWORD error = GetLastError();
+                if (Sink) Sink->OnError((L"Cannot clear ReadOnly on product file: " + std::wstring(Path) + L" Win32=" + std::to_wstring(error)).c_str());
+                return error;
+            }
+            if (Sink) Sink->OnDetail((L"Cleared ReadOnly on known product file (ACL unchanged): " + std::wstring(Path)).c_str());
+        }
+        return ERROR_SUCCESS;
+    }
+
+    DWORD CheckPendingProductRemoval(const wchar_t* InstallDir, IStepSink* Sink)
+    {
+        HKEY key = nullptr;
+        LONG rc = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager", 0,
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key);
+        if (rc != ERROR_SUCCESS) return static_cast<DWORD>(rc);
+        DWORD type = 0, bytes = 0;
+        rc = RegQueryValueExW(key, L"PendingFileRenameOperations", nullptr, &type, nullptr, &bytes);
+        if (rc == ERROR_FILE_NOT_FOUND) { RegCloseKey(key); return ERROR_SUCCESS; }
+        if (rc != ERROR_SUCCESS || type != REG_MULTI_SZ || bytes > 1024 * 1024 || bytes % sizeof(wchar_t)) {
+            RegCloseKey(key); return rc ? static_cast<DWORD>(rc) : ERROR_INVALID_DATA;
+        }
+        if (!bytes) { RegCloseKey(key); return ERROR_SUCCESS; }
+        std::vector<wchar_t> data(bytes / sizeof(wchar_t), 0);
+        rc = RegQueryValueExW(key, L"PendingFileRenameOperations", nullptr, &type, reinterpret_cast<BYTE*>(data.data()), &bytes);
+        RegCloseKey(key);
+        if (rc != ERROR_SUCCESS) return static_cast<DWORD>(rc);
+        if (type != REG_MULTI_SZ || bytes % sizeof(wchar_t)) return ERROR_INVALID_DATA;
+        data.resize(bytes / sizeof(wchar_t));
+        std::vector<std::wstring> pairs;
+        if (!ParsePendingRenamePairs(data, pairs)) return ERROR_INVALID_DATA;
+        std::vector<std::wstring> owned = {InstallDir, std::wstring(InstallDir) + L"\\" + kSetupCopyName};
+        for (const auto& file : kProductFiles) owned.push_back(std::wstring(InstallDir) + L"\\" + file.Name);
+        std::wstring pending;
+        if (!HasPendingProductDeletion(pairs, owned, pending)) return ERROR_SUCCESS;
+        if (Sink) Sink->OnError((L"Previous removal is pending: " + pending +
+            L". Restart Windows before installing again; no pending system operations were changed.").c_str());
+        return ERROR_SUCCESS_REBOOT_REQUIRED;
+    }
+
     _Use_decl_annotations_
-    DWORD InstallProductFiles(const wchar_t* InstallDir, DWORD* pBytesWritten)
+    DWORD InstallProductFiles(const wchar_t* InstallDir, DWORD* pBytesWritten, IStepSink* Sink)
     {
         *pBytesWritten = 0;
 
@@ -248,9 +301,11 @@ namespace DeskSplit
                 return ERROR_BUFFER_OVERFLOW;
             }
 
-            Error = WriteResourceToFile(File.Resource, Path);
+            Error = PrepareProductFile(Path, Sink);
+            if (!Error) Error = WriteResourceToFile(File.Resource, Path);
             if (Error != ERROR_SUCCESS)
             {
+                if (Sink) Sink->OnError((L"Cannot write product file: " + std::wstring(Path) + L" Win32=" + std::to_wstring(Error)).c_str());
                 return Error;
             }
 
@@ -273,9 +328,12 @@ namespace DeskSplit
 
         if (_wcsicmp(SelfPath, SetupTarget) != 0)
         {
-            if (!CopyFileW(SelfPath, SetupTarget, FALSE))
-            {
-                return GetLastError();
+            Error = PrepareProductFile(SetupTarget, Sink);
+            if (!Error && !CopyFileW(SelfPath, SetupTarget, FALSE)) Error = GetLastError();
+            if (!Error) Error = PrepareProductFile(SetupTarget, Sink); // CopyFile inherits source attributes.
+            if (Error) {
+                if (Sink) Sink->OnError((L"Cannot replace installed setup: " + std::wstring(SetupTarget) + L" source=" + SelfPath + L" Win32=" + std::to_wstring(Error)).c_str());
+                return Error;
             }
 
             LARGE_INTEGER Size = {};
@@ -428,14 +486,16 @@ namespace DeskSplit
     }
 
     _Use_decl_annotations_
-    DWORD RemoveProductFiles(const wchar_t* InstallDir)
+    DWORD RemoveProductFiles(const wchar_t* InstallDir, IStepSink* Sink)
     {
         if (!InstallDir || !InstallDir[0]) return ERROR_INVALID_PARAMETER;
         wchar_t self[MAX_PATH] = {};
         DWORD length = GetModuleFileNameW(nullptr, self, ARRAYSIZE(self));
         if (!length) return GetLastError();
         if (length >= ARRAYSIZE(self)) return ERROR_INSUFFICIENT_BUFFER;
-        auto remove = [](const std::wstring& path) -> DWORD {
+        auto remove = [Sink](const std::wstring& path) -> DWORD {
+            DWORD prepared = PrepareProductFile(path.c_str(), Sink);
+            if (prepared) return prepared;
             if (DeleteFileW(path.c_str())) return ERROR_SUCCESS;
             DWORD error = GetLastError();
             return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? ERROR_SUCCESS : error;
@@ -447,7 +507,13 @@ namespace DeskSplit
         std::wstring setup = std::wstring(InstallDir) + L"\\" + kSetupCopyName;
         bool restart = _wcsicmp(self, setup.c_str()) == 0;
         if (restart) {
+            DWORD prepared = PrepareProductFile(setup.c_str(), Sink);
+            if (prepared) return prepared;
             if (!MoveFileExW(setup.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT)) return GetLastError();
+            if (Sink) Sink->OnDetail((L"Scheduled deletion after restart (file still present): " + setup).c_str());
+            // Windows deletes a directory only if empty. Unrelated user files are preserved.
+            if (!MoveFileExW(InstallDir, nullptr, MOVEFILE_DELAY_UNTIL_REBOOT)) return GetLastError();
+            if (Sink) Sink->OnDetail((L"Scheduled empty-directory cleanup after restart: " + std::wstring(InstallDir)).c_str());
         } else {
             DWORD error = remove(setup);
             if (error) return error;
