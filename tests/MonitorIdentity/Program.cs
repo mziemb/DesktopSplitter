@@ -203,6 +203,26 @@ Test("Revert requests during Apply coalesce and repeated Revert cannot overlap",
     Check(queue.Request(true) == RevertRequestDisposition.AlreadyReverting);
     queue.CompleteRevert(); Check(queue.Request(false) == RevertRequestDisposition.Start);
 });
+Test("three stacked tiles a portrait Samsung and exposes two horizontal dividers", () => {
+    var layout = LayoutDefinition.FromKind(LayoutKind.ThreeHorizontal);
+    var sizes = layout.ComputeDefaultSegmentSizes(1080, 1920);
+    Check(layout.Columns == 1 && layout.Rows == 3 && layout.SegmentCount == 3);
+    Check(layout.VerticalSplitLines.Count == 0 && layout.HorizontalSplitLines.SequenceEqual(new[] { 0, 1 }));
+    Check(sizes.All(s => s.Width == 1080 && s.Height == 640));
+    var rects = LayoutGeometry.ComputePhysRects(layout, 1080, 1920, sizes);
+    Check(rects.SequenceEqual(new[] { new PixelRect(0, 0, 1080, 640), new PixelRect(0, 640, 1080, 640), new PixelRect(0, 1280, 1080, 640) }));
+    Check(layout.PreviewBoxes.Count == 3 && layout.PreviewBoxes.Select(p => p.Y).SequenceEqual(layout.PreviewBoxes.Select(p => p.Y).OrderBy(y => y)));
+});
+Test("three stacked preserves coverage after resizing and persists without renumbering older layouts", () => {
+    var layout = LayoutDefinition.FromKind(LayoutKind.ThreeHorizontal);
+    var rects = LayoutGeometry.ComputePhysRects(layout, 1080, 1921, new[] { (1080, 640), (1080, 700), (1080, 640) });
+    Check(rects[0].Y == 0 && rects[1].Y == rects[0].H && rects[2].Y == rects[1].Y + rects[1].H);
+    Check(rects.Sum(r => r.H) == 1921 && rects.All(r => r.X == 0 && r.W == 1080));
+    var saved = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(new AppSettings { Layout = LayoutKind.ThreeHorizontal }))!;
+    Check(LayoutDefinition.FromKind(saved.Layout) == layout);
+    Check((int)LayoutKind.TwoHorizontal == 1 && (int)LayoutKind.ThreeColumns == 2 && (int)LayoutKind.SixteenNineCenter == 6);
+});
+
 Console.WriteLine($"{passed} tests passed; no Windows display APIs were called.");
 
 sealed class FakeHotkeyBackend : IHotkeyBackend
