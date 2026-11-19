@@ -619,10 +619,16 @@ namespace DeskSplit
                         if (reply == 2) { ctx.busy = true; return FALSE; }
                         if (reply == 1) { ctx.acknowledged = true; return TRUE; }
                     }
-                    PostMessageW(window, WM_CLOSE, 0, 0);
                     return TRUE;
                 }, reinterpret_cast<LPARAM>(&context));
                 if (context.busy) { error = ERROR_BUSY; if (Sink) Sink->OnError(L"Application refused installer shutdown while Apply/Revert is running; no forced termination."); break; }
+                if (!context.acknowledged) {
+                    EnumWindows([](HWND window, LPARAM value) -> BOOL {
+                        DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+                        if (pid == static_cast<DWORD>(value)) PostMessageW(window, WM_CLOSE, 0, 0);
+                        return TRUE;
+                    }, static_cast<LPARAM>(process.pid));
+                }
                 DWORD wait = WaitForSingleObject(process.process, context.acknowledged ? 25000 : 1500);
                 if (wait == WAIT_TIMEOUT && !context.acknowledged) {
                     DWORD session = 0; wchar_t key[CCH_RM_SESSION_KEY + 1] = {};
