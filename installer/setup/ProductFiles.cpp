@@ -567,7 +567,7 @@ namespace DeskSplit
     }
 
     _Use_decl_annotations_
-    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount, IStepSink* Sink)
+    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount, IStepSink* Sink, const std::function<bool()>& ConfirmIdleForForce)
     {
         *pStoppedCount = 0;
         DWORD ownSession = 0;
@@ -606,7 +606,7 @@ namespace DeskSplit
         });
         if (!error) {
             const UINT exitMessage = RegisterWindowMessageW(L"DesktopSplitter.InstallerExit.v1");
-            struct CloseContext { DWORD pid; UINT message; bool busy = false, acknowledged = false; };
+            struct CloseContext { DWORD pid; UINT message; bool busy = false, acknowledged = false; DWORD windows = 0, messageError = 0; };
             for (const auto& process : running) {
                 if (WaitForSingleObject(process.process, 0) == WAIT_OBJECT_0) { ++*pStoppedCount; continue; }
                 CloseContext context = {process.pid, exitMessage};
@@ -614,13 +614,15 @@ namespace DeskSplit
                     auto& ctx = *reinterpret_cast<CloseContext*>(value);
                     DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
                     if (pid != ctx.pid) return TRUE;
+                    ++ctx.windows;
                     DWORD_PTR reply = 0;
                     if (ctx.message && SendMessageTimeoutW(window, ctx.message, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &reply)) {
                         if (reply == 2) { ctx.busy = true; return FALSE; }
                         if (reply == 1) { ctx.acknowledged = true; return TRUE; }
-                    }
+                    } else ctx.messageError = GetLastError();
                     return TRUE;
                 }, reinterpret_cast<LPARAM>(&context));
+                if (Sink) Sink->OnDetail((L"IPC probe PID=" + std::to_wstring(process.pid) + L" windows=" + std::to_wstring(context.windows) + L" ack=" + std::to_wstring(context.acknowledged) + L" busy=" + std::to_wstring(context.busy) + L" last_message_Win32=" + std::to_wstring(context.messageError)).c_str());
                 if (context.busy) { error = ERROR_BUSY; if (Sink) Sink->OnError(L"Application refused installer shutdown while Apply/Revert is running; no forced termination."); break; }
                 if (!context.acknowledged) {
                     EnumWindows([](HWND window, LPARAM value) -> BOOL {
@@ -642,8 +644,43 @@ namespace DeskSplit
                     }
                     wait = WaitForSingleObject(process.process, error ? 0 : 15000);
                 }
+                if (wait == WAIT_TIMEOUT && !context.acknowledged && ConfirmIdleForForce &&
+                    (error == ERROR_FAIL_SHUTDOWN || error == ERROR_SUCCESS)) {
+                    // Never force a different user, a reused PID, an acknowledged recovery,
+                    // or an unverified display state. Keep the original process handle alive.
+                    HANDLE target = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, process.pid);
+                    DWORD forceError = target ? ERROR_SUCCESS : GetLastError();
+                    HANDLE ownToken = nullptr, targetToken = nullptr;
+                    if (target && (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &ownToken) || !OpenProcessToken(target, TOKEN_QUERY, &targetToken))) forceError = GetLastError();
+                    auto userSid = [](HANDLE token, std::vector<BYTE>& data) -> bool {
+                        DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+                        if (!size) return false;
+                        data.resize(size); return GetTokenInformation(token, TokenUser, data.data(), size, &size) != FALSE;
+                    };
+                    std::vector<BYTE> ownUser, targetUser;
+                    if (!forceError && (!userSid(ownToken, ownUser) || !userSid(targetToken, targetUser))) forceError = GetLastError();
+                    if (!forceError && !EqualSid(reinterpret_cast<TOKEN_USER*>(ownUser.data())->User.Sid, reinterpret_cast<TOKEN_USER*>(targetUser.data())->User.Sid)) forceError = ERROR_ACCESS_DENIED;
+                    FILETIME created = {}, exited = {}, kernel = {}, user = {};
+                    wchar_t path[32768] = {}; DWORD chars = ARRAYSIZE(path), session = 0;
+                    if (!forceError && (!GetProcessTimes(target, &created, &exited, &kernel, &user) || !QueryFullProcessImageNameW(target, 0, path, &chars) || !ProcessIdToSessionId(process.pid, &session))) forceError = GetLastError();
+                    if (!forceError && (CompareFileTime(&created, &process.created) || _wcsicmp(path, process.path.c_str()) || session != ownSession)) forceError = ERROR_ACCESS_DENIED;
+                    if (!forceError && !ConfirmIdleForForce()) forceError = ERROR_BUSY;
+                    if (!forceError) {
+                        if (Sink) Sink->OnDetail((L"Force-close permitted after idle/recovery checks: PID=" + std::to_wstring(process.pid) + L" path=" + process.path).c_str());
+                        if (!TerminateProcess(target, ERROR_PROCESS_ABORTED)) forceError = GetLastError();
+                        else {
+                            wait = WaitForSingleObject(target, 10000);
+                            if (wait != WAIT_OBJECT_0) forceError = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+                        }
+                    }
+                    if (ownToken) CloseHandle(ownToken);
+                    if (targetToken) CloseHandle(targetToken);
+                    if (target) CloseHandle(target);
+                    if (Sink) Sink->OnDetail((L"Force-close result PID=" + std::to_wstring(process.pid) + L" Win32=" + std::to_wstring(forceError) + L" wait=" + std::to_wstring(wait)).c_str());
+                    error = forceError;
+                }
                 if (Sink) Sink->OnDetail((L"Shutdown result PID=" + std::to_wstring(process.pid) + L" path=" + process.path + L" IPC_ack=" + std::to_wstring(context.acknowledged) + L" wait=" + std::to_wstring(wait)).c_str());
-                if (wait == WAIT_OBJECT_0) ++*pStoppedCount;
+                if (wait == WAIT_OBJECT_0) { ++*pStoppedCount; error = ERROR_SUCCESS; }
                 else if (!error) error = wait == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError();
                 if (error) break;
             }

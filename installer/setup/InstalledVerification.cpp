@@ -176,11 +176,8 @@ StageResult VerifyProductFiles(const wchar_t* directory) {
     DWORD error = CompareFile(Join(directory, files[5]), self);
     return error ? Error(error, L"Installed setup executable differs from this installer") : StageResult::Pass();
 }
-StageResult CheckUpgradeState(const wchar_t* directory, IStepSink* sink) {
-    int stopped = 0;
-    DWORD shutdownError = QuiesceProductProcesses(directory, &stopped, sink);
-    if (shutdownError) return Error(shutdownError, L"A verified DesktopSplitter component did not exit after installer IPC / Restart Manager shutdown. See PID, path and wait results above; no forced termination was performed.");
-    sink->OnDetail((L"Gracefully closed components: " + std::to_wstring(stopped)).c_str());
+namespace {
+StageResult CheckRecoveryOwnership() {
     wchar_t appdata[MAX_PATH] = {};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata)))
         return Error(ERROR_PATH_NOT_FOUND, L"Cannot inspect the current user's display recovery state");
@@ -199,9 +196,45 @@ StageResult CheckUpgradeState(const wchar_t* directory, IStepSink* sink) {
         ds::json::Value root; std::string parseError;
         if (!ok || read != text.size() || !ds::json::Parse(text, root, parseError) || !root.isObject())
             return Error(ERROR_INVALID_DATA, L"Display recovery settings are unreadable; no automatic overwrite");
+        for (const char* key : {"specializedDevice", "SpecializedStableMonitorId"}) {
+            const auto* value = root.find(key);
+            if (value && !value->isString()) return Error(ERROR_INVALID_DATA, L"Recovery ownership has an invalid type; state is unknown");
+        }
         if (!root.stringMember("specializedDevice").empty() || !root.stringMember("SpecializedStableMonitorId").empty())
             return Error(ERROR_BUSY, L"Hidden-display recovery ownership remains. Restore that display using the installed app before upgrading; settings retained.");
     }
+    return StageResult::Pass();
+}
+bool ConfirmIdleForForcedClose(IStepSink* sink) {
+    auto recovery = CheckRecoveryOwnership();
+    if (!recovery.ok) { sink->OnError((L"Force-close refused: " + recovery.detail).c_str()); return false; }
+    std::vector<DeviceNodeInfo> all, present;
+    DWORD error = ListDeviceNodes(DESKSPLIT_HARDWARE_ID, false, all);
+    if (!error) error = ListDeviceNodes(DESKSPLIT_HARDWARE_ID, true, present);
+    if (error || all.size() != present.size() || present.size() > 1) {
+        sink->OnError(L"Force-close refused: device presence/identity is unknown or ambiguous."); return false;
+    }
+    if (present.empty()) { sink->OnDetail(L"Force-close safety check: no DesktopSplitter device, no recovery ownership."); return true; }
+    const auto& node = present[0];
+    if (!node.HasStatus || node.Problem || !(node.Status & DN_STARTED)) {
+        sink->OnError(L"Force-close refused: driver state is unknown or not healthy."); return false;
+    }
+    uint32_t active = 0;
+    auto probe = ProbeDriver(node, active);
+    if (!probe.ok || active) {
+        sink->OnError((L"Force-close refused: GET_STATUS failed or active split exists; active=" + std::to_wstring(active)).c_str()); return false;
+    }
+    sink->OnDetail(L"Force-close safety check: verified GET_STATUS, zero active virtual monitors, no recovery ownership.");
+    return true;
+}
+}
+StageResult CheckUpgradeState(const wchar_t* directory, IStepSink* sink) {
+    int stopped = 0;
+    DWORD shutdownError = QuiesceProductProcesses(directory, &stopped, sink, [sink] { return ConfirmIdleForForcedClose(sink); });
+    if (shutdownError) return Error(shutdownError, L"A verified DesktopSplitter component did not exit after installer IPC / Restart Manager shutdown. See PID, path, idle/recovery checks and shutdown results above. Forced closing is refused unless the display state and process identity are safe.");
+    sink->OnDetail((L"Stopped verified components: " + std::to_wstring(stopped)).c_str());
+    auto recovery = CheckRecoveryOwnership();
+    if (!recovery.ok) return recovery;
     std::vector<DeviceNodeInfo> all, present;
     DWORD error = ListDeviceNodes(DESKSPLIT_HARDWARE_ID, false, all);
     if (error) return Error(error, L"Cannot enumerate previous root device instances");

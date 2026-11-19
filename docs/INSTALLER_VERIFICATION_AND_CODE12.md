@@ -274,5 +274,41 @@ and detection of a locked setup before PnP changes. Fixtures use temporary files
 and controlled child processes, never actual installation or display APIs.
 Real Windows 11 acceptance still includes app-to-tray, active split restoration,
 installed-path GUI uninstall/handoff, a second setup window, and external quiet
-installation. A hung older app may still refuse graceful Restart Manager shutdown;
-setup then fails with evidence instead of forcibly interrupting display recovery.
+installation. A hung older app may refuse graceful Restart Manager shutdown; the guarded idle-only
+fallback below applies. Display recovery is never interrupted by that fallback.
+
+
+## Follow-up: Restart Manager ERROR_FAIL_SHUTDOWN (351)
+
+The later supplied log confirms that temporary setup handoff works. The verified
+DesktopSplitter.exe process did not acknowledge IPC (ack=0), Restart Manager
+returned 351 (ERROR_FAIL_SHUTDOWN), and waiting returned 258 (WAIT_TIMEOUT). This
+proves failure to close the process, not whether it is an older build or has a
+blocked UI. IPC logs now distinguish window count, busy acknowledgement, accepted
+shutdown and the last SendMessageTimeout error.
+
+After graceful shutdown fails with 351 (or succeeds but leaves the process alive),
+setup may now terminate only that exact process if all of these checks pass:
+
+- No explicit busy reply and no accepted shutdown/recovery still in progress.
+- PID creation time, executable path and session match the original checked handle.
+- Process owner SID matches the account running setup.
+- Recovery settings are readable and have no hidden-display ownership; malformed
+  fields are unknown, not empty.
+- Device enumeration is unambiguous. Either there is no DesktopSplitter device,
+  or the present unique device is healthy, DN_STARTED and returns a valid
+  GET_STATUS with zero active virtual monitors.
+
+The process is opened separately with terminate rights, terminated by handle and
+waited on. Only confirmed process exit clears the shutdown error. PID, proof and
+force result are logged. After shutdown the ordinary recovery/PnP/file checks run
+again before staging or removal. Active/unknown display state, a different user,
+identity mismatch, an explicit busy reply, or accepted-but-incomplete recovery
+still block forced closing. This replaces the earlier graceful-only fallback;
+there is no unconditional taskkill or termination by basename.
+
+Windows fixtures additionally cover a process refusing shutdown, permitted idle
+force closure, rejected force closure, and a shutdown acknowledgement that must
+not be overridden. The display-safety callback is mocked in these fixtures; no
+real PnP or display configuration is changed. Actual Windows 11 acceptance must
+retain the force-check and post-shutdown log lines before reporting success.

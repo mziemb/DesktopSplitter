@@ -3,6 +3,7 @@
 #pragma once
 
 #include <windows.h>
+#include <functional>
 
 namespace DeskSplit
 {
@@ -62,8 +63,9 @@ namespace DeskSplit
     // copy inside InstallDir is scheduled for delete-on-reboot if it is us.
     DWORD RemoveProductFiles(_In_z_ const wchar_t* InstallDir, IStepSink* Sink = nullptr);
 
-    // Upgrade path: exact executable path + current session, graceful only, bounded wait.
-    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount, IStepSink* Sink = nullptr);
+    // Exact identity/session/user; graceful first, guarded idle-only forced fallback.
+    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount, IStepSink* Sink = nullptr,
+        const std::function<bool()>& ConfirmIdleForForce = {});
 
     // Stops DesktopSplitter.exe / dscomp.exe before an upgrade or uninstall.
     void StopRunningProcesses(_Out_ int* pStoppedCount);

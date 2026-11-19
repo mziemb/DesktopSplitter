@@ -28,11 +28,15 @@ std::wstring fixtureMode;
 LRESULT CALLBACK FixtureWindow(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == RegisterWindowMessageW(L"DesktopSplitter.InstallerExit.v1")) {
         if (fixtureMode == L"busy") return 2;
+        if (fixtureMode == L"ack-stuck") return 1;
         if (fixtureMode == L"ipc") { PostQuitMessage(0); return 1; }
         return 0;
     }
     if (message == WM_CLOSE) return 0; // Reproduce a legacy tray app.
-    if (message == WM_QUERYENDSESSION) return TRUE;
+    if (message == WM_QUERYENDSESSION) {
+        if (fixtureMode == L"stubborn") { Sleep(40000); return FALSE; }
+        return TRUE;
+    }
     if (message == WM_ENDSESSION && wparam) { PostQuitMessage(0); return 0; }
     if (message == WM_APP + 1) { PostQuitMessage(0); return 0; }
     return DefWindowProcW(window, message, wparam, lparam);
@@ -73,7 +77,10 @@ struct Fixture {
             if (pid == static_cast<DWORD>(pidValue)) PostMessageW(window, WM_APP + 1, 0, 0);
             return TRUE;
         }, static_cast<LPARAM>(process.dwProcessId));
-        WaitForSingleObject(process.hProcess, 5000);
+        if (WaitForSingleObject(process.hProcess, 10000) == WAIT_TIMEOUT) {
+            // Only this test-created fixture, never a real product process.
+            TerminateProcess(process.hProcess, 99); WaitForSingleObject(process.hProcess, 5000);
+        }
         CloseHandle(process.hThread); CloseHandle(process.hProcess);
     }
 };
@@ -144,13 +151,31 @@ int wmain(int argc, wchar_t** argv) {
     });
     test("busy application refuses shutdown without being killed", [&] {
         Fixture child(base, L"busy"); int stopped = 0;
-        Check(QuiesceProductProcesses(base.c_str(), &stopped, &sink) == ERROR_BUSY && stopped == 0);
+        int guardCalls = 0;
+        Check(QuiesceProductProcesses(base.c_str(), &stopped, &sink, [&] { ++guardCalls; return true; }) == ERROR_BUSY && stopped == 0);
+        Check(guardCalls == 0);
         Check(WaitForSingleObject(child.process.hProcess, 0) == WAIT_TIMEOUT);
     });
     test("same basename outside installation directory is never closed", [&] {
         Fixture child(base, L"ipc"); int stopped = 0;
         Check(QuiesceProductProcesses(target.c_str(), &stopped, &sink) == ERROR_BUSY && stopped == 0);
         Check(WaitForSingleObject(child.process.hProcess, 0) == WAIT_TIMEOUT);
+    });
+    test("acknowledged shutdown is never force-terminated", [&] {
+        Fixture child(base, L"ack-stuck"); int stopped = 0, guardCalls = 0;
+        Check(QuiesceProductProcesses(base.c_str(), &stopped, &sink, [&] { ++guardCalls; return true; }) == ERROR_BUSY);
+        Check(guardCalls == 0 && WaitForSingleObject(child.process.hProcess, 0) == WAIT_TIMEOUT);
+    });
+    test("stubborn idle same-user process is closed after guarded force fallback", [&] {
+        Fixture child(base, L"stubborn"); int stopped = 0, guardCalls = 0;
+        Check(QuiesceProductProcesses(base.c_str(), &stopped, &sink, [&] { ++guardCalls; return true; }) == 0);
+        Check(guardCalls == 1 && stopped == 1 && WaitForSingleObject(child.process.hProcess, 0) == WAIT_OBJECT_0);
+        DWORD code = 0; Check(GetExitCodeProcess(child.process.hProcess, &code) && code == ERROR_PROCESS_ABORTED);
+    });
+    test("unsafe display-state guard prevents forced closure", [&] {
+        Fixture child(base, L"stubborn"); int stopped = 0, guardCalls = 0;
+        Check(QuiesceProductProcesses(base.c_str(), &stopped, &sink, [&] { ++guardCalls; return false; }) != 0);
+        Check(guardCalls == 1 && stopped == 0 && WaitForSingleObject(child.process.hProcess, 0) == WAIT_TIMEOUT);
     });
     test("another setup process cannot acquire the mutation mutex", [&] {
         SetupInstanceLock first; Check(first.Acquired);
