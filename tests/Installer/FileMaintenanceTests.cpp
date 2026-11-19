@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <functional>
 #include <cstring>
+#include <thread>
 #include "../../installer/setup/SetupRuntime.h"
 using namespace DeskSplit;
 void Check(bool value) { if (!value) throw std::runtime_error("assertion failed"); }
@@ -38,6 +39,12 @@ LRESULT CALLBACK FixtureWindow(HWND window, UINT message, WPARAM wparam, LPARAM 
 }
 int RunFixture(const wchar_t* mode, const wchar_t* eventName) {
     fixtureMode = mode;
+    if (fixtureMode == L"mutex") {
+        SetupInstanceLock lock;
+        HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, eventName); Check(ready != nullptr);
+        Check(SetEvent(ready)); CloseHandle(ready);
+        return lock.Acquired ? 0 : 18;
+    }
     WNDCLASSW cls = {}; cls.lpfnWndProc = FixtureWindow; cls.lpszClassName = L"DS.Setup.ProcessFixture"; cls.hInstance = GetModuleHandleW(nullptr);
     Check(RegisterClassW(&cls) != 0);
     HWND window = CreateWindowW(cls.lpszClassName, L"DS test fixture", 0, 0, 0, 0, 0, nullptr, nullptr, cls.hInstance, nullptr);
@@ -144,6 +151,28 @@ int wmain(int argc, wchar_t** argv) {
         Fixture child(base, L"ipc"); int stopped = 0;
         Check(QuiesceProductProcesses(target.c_str(), &stopped, &sink) == ERROR_BUSY && stopped == 0);
         Check(WaitForSingleObject(child.process.hProcess, 0) == WAIT_TIMEOUT);
+    });
+    test("another setup process cannot acquire the mutation mutex", [&] {
+        SetupInstanceLock first; Check(first.Acquired);
+        Fixture child(base, L"mutex");
+        Check(WaitForSingleObject(child.process.hProcess, 5000) == WAIT_OBJECT_0);
+        DWORD code = 0; Check(GetExitCodeProcess(child.process.hProcess, &code) && code == 18);
+    });
+    test("handoff waits for the source process to exit before mutation", [&] {
+        Fixture child(base, L"legacy");
+        HANDLE inherited = nullptr;
+        Check(DuplicateHandle(GetCurrentProcess(), child.process.hProcess, GetCurrentProcess(), &inherited, 0, FALSE, DUPLICATE_SAME_ACCESS));
+        Check(WaitForSingleObject(child.process.hProcess, 0) == WAIT_TIMEOUT);
+        std::thread close([&] {
+            Sleep(100);
+            EnumWindows([](HWND window, LPARAM value) -> BOOL {
+                DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+                if (pid == static_cast<DWORD>(value)) PostMessageW(window, WM_APP + 1, 0, 0);
+                return TRUE;
+            }, static_cast<LPARAM>(child.process.dwProcessId));
+        });
+        bool exited = WaitForSetupParent(reinterpret_cast<ULONG_PTR>(inherited)); close.join();
+        Check(exited && WaitForSingleObject(child.process.hProcess, 0) == WAIT_OBJECT_0);
     });
     Check(DeleteFileW((base + L"\\DesktopSplitter.exe").c_str()));
     Check(SetFileAttributesW(original.c_str(), FILE_ATTRIBUTE_NORMAL));
