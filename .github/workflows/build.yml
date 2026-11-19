@@ -97,6 +97,14 @@ jobs:
             & .\file-maintenance-tests.exe
             if ($LASTEXITCODE -ne 0) { throw "File maintenance tests failed: $LASTEXITCODE" }
           } finally { Pop-Location }
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Test actual hidden WPF installer endpoint (no display changes)
+        shell: pwsh
+        run: |
+          dotnet run --project tests/InstallerIpc/InstallerIpc.Tests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "WPF IPC tests failed: $LASTEXITCODE" }
   build:
     runs-on: windows-2022
     timeout-minutes: 90

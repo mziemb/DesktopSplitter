@@ -320,3 +320,8 @@ window created with EnsureHandle before Show, silently leaving IPC unhandled.
 This is a code-level possible explanation for ack=0 in a new build, not proof that
 this exact path occurred in the supplied log. The installed app's build and IPC
 window/error evidence are needed to distinguish it from an older or blocked app.
+
+The production IPC hook is isolated in InstallerShutdownHook.cs and exercised on
+Windows with an actual hidden WPF HWND created by EnsureHandle without Show.
+Tests verify acknowledgement/queued teardown, busy refusal, unrelated messages
+and disposal, without starting the application or invoking display APIs.
