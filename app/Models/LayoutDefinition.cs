@@ -14,6 +14,7 @@ public enum LayoutKind
     /// the sides take the remainder. Segment 1 is the CENTRE (see <see cref="LayoutDefinition"/>).
     /// </summary>
     SixteenNineCenter = 6,
+    ThreeHorizontal = 7,      // stacked; append to preserve saved layout IDs
 }
 
 /// <summary>One segment of a layout.</summary>
@@ -208,6 +209,12 @@ public sealed class LayoutDefinition
             Array.Empty<int>(), new[] { 0 },
             new LayoutCell(0.0, 0.0, 1.0, 0.5, 0, 0, 1, 1),
             new LayoutCell(0.0, 0.5, 1.0, 0.5, 0, 1, 1, 1)),
+
+        Make(LayoutKind.ThreeHorizontal, "3 — stacked", "Three equal segments stacked vertically", 1, 3,
+            Array.Empty<int>(), new[] { 0, 1 },
+            new LayoutCell(0.0, 0.0,       1.0, 1.0 / 3.0, 0, 0, 1, 1),
+            new LayoutCell(0.0, 1.0 / 3.0, 1.0, 1.0 / 3.0, 0, 1, 1, 1),
+            new LayoutCell(0.0, 2.0 / 3.0, 1.0, 1.0 / 3.0, 0, 2, 1, 1)),
 
         Make(LayoutKind.ThreeColumns, "3 — columns", "Three equal columns", 3, 1,
             new[] { 0, 1 }, Array.Empty<int>(),
