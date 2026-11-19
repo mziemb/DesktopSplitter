@@ -160,10 +160,11 @@ namespace
     {
         // Refuse to create a second node.
         const int Existing = ForEachMatchingDevice([](HDEVINFO, SP_DEVINFO_DATA*) {});
+        if (Existing < 0) return 1;
         if (Existing > 0)
         {
-            wprintf(L"Device node already exists (%d); nothing to do.\n", Existing);
-            return 0;
+            wprintf(L"Device node(s) already exist (%d). This does not prove driver readiness; use DesktopSplitterSetup.exe /verify-installed.\n", Existing);
+            return 1;
         }
 
         GUID ClassGuid = GUID_DEVCLASS_DISPLAY;
@@ -219,7 +220,8 @@ namespace
             BOOL RebootRequired = FALSE;
             if (DiInstallDevice(nullptr, DevInfo, &DevInfoData, nullptr, 0, &RebootRequired))
             {
-                wprintf(L"Driver installed on the new node.%s\n", RebootRequired ? L" (reboot required)" : L"");
+                wprintf(L"Device binding completed; runtime readiness still requires DesktopSplitterSetup.exe /verify-installed.%s\n", RebootRequired ? L" (reboot required)" : L"");
+                Result = RebootRequired ? ERROR_SUCCESS_REBOOT_REQUIRED : ERROR_SUCCESS;
             }
             else
             {
@@ -228,8 +230,6 @@ namespace
                 wprintf(L"  Run: pnputil /add-driver DesktopSplitterVdd.inf /install\n");
             }
         }
-
-        Result = 0;
 
     Cleanup:
         SetupDiDestroyDeviceInfoList(DevInfo);

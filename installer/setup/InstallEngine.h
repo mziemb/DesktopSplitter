@@ -27,6 +27,12 @@ namespace DeskSplit
         ExitUninstallFailed = 11,
         ExitFileInstallFailed = 12,
         ExitCancelled = 13,
+        ExitRegistrationFailed = 14,
+        ExitLogFailed = 15,
+        ExitPendingRemoval = 16,
+        ExitSetupHandoff = 17,
+        ExitSetupBusy = 18,
+        ExitRestartRequired = 3010,
     };
 
     // UI callbacks. Every implementation must be safe to call from the thread
@@ -61,6 +67,9 @@ namespace DeskSplit
     // Full product install: driver package + device node + program files +
     // shortcuts + registry. Returns an ExitCode.
     int RunInstallSequence(_In_ const InstallOptions* pOptions, _In_ IStepSink* pSink);
+
+    // Read-only runtime/file verification after a restart (does not stage or install a driver).
+    int RunInstalledVerification(IStepSink* pSink);
 
     // Full product removal.
     int RunUninstallSequence(_In_ const UninstallOptions* pOptions, _In_ IStepSink* pSink);

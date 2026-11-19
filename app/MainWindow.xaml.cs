@@ -15,6 +15,7 @@ public partial class MainWindow : Window, IHidingUi
 {
     private const int WM_DISPLAYCHANGE = 0x007E;
 
+    private InstallerShutdownHook? _installerExitHook;
     private readonly MainViewModel _viewModel;
     private readonly TrayIconService? _tray;
     private readonly DispatcherTimer _displayChangeDebounce;
@@ -187,8 +188,18 @@ public partial class MainWindow : Window, IHidingUi
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        if (PresentationSource.FromVisual(this) is HwndSource source)
-            source.AddHook(WndProc);
+        // EnsureHandle can create a hidden HWND before the window has a visual
+        // presentation source (startup-to-tray). Attach by HWND, not by Visual.
+        IntPtr handle = new WindowInteropHelper(this).Handle;
+        HwndSource.FromHwnd(handle)?.AddHook(WndProc);
+        _installerExitHook = new InstallerShutdownHook(handle, () => _viewModel.IsBusy,
+            () => Dispatcher.BeginInvoke(new Action(() => (Application.Current as App)?.ExitApplication())));
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _installerExitHook?.Dispose();
+        base.OnClosed(e);
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
