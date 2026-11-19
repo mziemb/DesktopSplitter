@@ -312,3 +312,11 @@ force closure, rejected force closure, and a shutdown acknowledgement that must
 not be overridden. The display-safety callback is mocked in these fixtures; no
 real PnP or display configuration is changed. Actual Windows 11 acceptance must
 retain the force-check and post-shutdown log lines before reporting success.
+
+
+The application window hook now attaches using HwndSource.FromHwnd after native
+source initialization. PresentationSource.FromVisual could be absent for a hidden
+window created with EnsureHandle before Show, silently leaving IPC unhandled.
+This is a code-level possible explanation for ack=0 in a new build, not proof that
+this exact path occurred in the supplied log. The installed app's build and IPC
+window/error evidence are needed to distinguish it from an older or blocked app.

@@ -191,8 +191,10 @@ public partial class MainWindow : Window, IHidingUi
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        if (PresentationSource.FromVisual(this) is HwndSource source)
-            source.AddHook(WndProc);
+        // EnsureHandle can create a hidden HWND before the window has a visual
+        // presentation source (startup-to-tray). Attach by HWND, not by Visual.
+        IntPtr handle = new WindowInteropHelper(this).Handle;
+        HwndSource.FromHwnd(handle)?.AddHook(WndProc);
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
