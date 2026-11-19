@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -13,6 +14,9 @@ namespace DesktopSplitter;
 
 public partial class MainWindow : Window, IHidingUi
 {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint RegisterWindowMessage(string message);
+    private static readonly uint InstallerExitMessage = RegisterWindowMessage("DesktopSplitter.InstallerExit.v1");
     private const int WM_DISPLAYCHANGE = 0x007E;
 
     private readonly MainViewModel _viewModel;
@@ -193,6 +197,13 @@ public partial class MainWindow : Window, IHidingUi
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (InstallerExitMessage != 0 && (uint)msg == InstallerExitMessage)
+        {
+            handled = true;
+            if (_viewModel.IsBusy) return new IntPtr(2); // Never interrupt Apply/Revert.
+            Dispatcher.BeginInvoke(new Action(() => (Application.Current as App)?.ExitApplication()));
+            return new IntPtr(1);
+        }
         if (msg == WM_DISPLAYCHANGE)
         {
             _displayChangeDebounce.Stop();

@@ -53,6 +53,8 @@ public partial class App : Application
         _tray.ExitRequested += (_, _) => ExitApplication();
 
         _window = new MainWindow(_viewModel, _tray);
+        // Keep an IPC endpoint available even when auto-starting directly to the tray.
+        new System.Windows.Interop.WindowInteropHelper(_window).EnsureHandle();
         try
         {
             _revertHotkey = new GlobalRevertHotkey();

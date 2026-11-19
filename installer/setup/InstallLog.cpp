@@ -14,6 +14,8 @@ InstallLog::InstallLog(IStepSink* sink) : sink_(sink) {
     file_ = CreateFileW(name, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file_ == INVALID_HANDLE_VALUE) { healthy_ = false; return; }
     OnDetail((L"Persistent log: " + path_).c_str());
+    wchar_t executable[MAX_PATH] = {}; GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable));
+    OnDetail((L"Setup process PID=" + std::to_wstring(GetCurrentProcessId()) + L" image=" + executable).c_str());
     OnDetail((L"Installer version: " + std::wstring(kProductVersion)).c_str());
     typedef LONG(WINAPI* VersionFunction)(OSVERSIONINFOW*);
     auto getVersion = reinterpret_cast<VersionFunction>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")));

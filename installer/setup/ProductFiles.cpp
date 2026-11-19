@@ -2,6 +2,7 @@
 #include "InstallEngine.h"
 #include "FileMaintenancePolicy.h"
 #include <vector>
+#include <algorithm>
 #include <string>
 #include "Payload.h"
 #include "resource.h"
@@ -13,6 +14,8 @@
 #include <shobjidl.h>
 #include <objbase.h>
 #include <tlhelp32.h>
+#include <RestartManager.h>
+#pragma comment(lib, "Rstrtmgr.lib")
 #include <strsafe.h>
 
 #include "DeskSplitProtocol.h"
@@ -248,6 +251,32 @@ namespace DeskSplit
                 return error;
             }
             if (Sink) Sink->OnDetail((L"Cleared ReadOnly on known product file (ACL unchanged): " + std::wstring(Path)).c_str());
+        }
+        return ERROR_SUCCESS;
+    }
+
+    DWORD CheckProductFilesWritable(const wchar_t* InstallDir, IStepSink* Sink)
+    {
+        std::vector<std::wstring> paths = {std::wstring(InstallDir) + L"\\" + kSetupCopyName};
+        for (const auto& file : kProductFiles) paths.push_back(std::wstring(InstallDir) + L"\\" + file.Name);
+        for (const auto& path : paths) {
+            DWORD attributes = GetFileAttributesW(path.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES) {
+                DWORD error = GetLastError();
+                if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
+                return error;
+            }
+            DWORD error = PrepareProductFile(path.c_str(), Sink);
+            if (!error) {
+                HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr); // Probe only: never truncate/write.
+                if (file == INVALID_HANDLE_VALUE) error = GetLastError();
+                else CloseHandle(file);
+            }
+            if (error) {
+                if (Sink) Sink->OnError((L"Product file is locked or not writable before PnP changes: " + path + L" Win32=" + std::to_wstring(error)).c_str());
+                return error;
+            }
         }
         return ERROR_SUCCESS;
     }
@@ -538,46 +567,79 @@ namespace DeskSplit
     }
 
     _Use_decl_annotations_
-    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount)
+    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount, IStepSink* Sink)
     {
         *pStoppedCount = 0;
         DWORD ownSession = 0;
         if (!ProcessIdToSessionId(GetCurrentProcessId(), &ownSession)) return GetLastError();
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snapshot == INVALID_HANDLE_VALUE) return GetLastError();
-        struct Running { DWORD pid; HANDLE process; };
+        struct Running { DWORD pid; HANDLE process; FILETIME created; std::wstring path; };
         std::vector<Running> running;
         DWORD error = ERROR_SUCCESS;
         PROCESSENTRY32W entry = {}; entry.dwSize = sizeof(entry);
-        if (!Process32FirstW(snapshot, &entry) && GetLastError() != ERROR_NO_MORE_FILES) error = GetLastError();
-        else do {
-            if (_wcsicmp(entry.szExeFile, L"DesktopSplitter.exe") && _wcsicmp(entry.szExeFile, L"dscomp.exe")) continue;
-            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, entry.th32ProcessID);
-            if (!process) { error = GetLastError(); break; }
-            wchar_t actual[32768] = {}; DWORD chars = ARRAYSIZE(actual), session = 0;
-            std::wstring expected = std::wstring(InstallDir) + L"\\" + entry.szExeFile;
-            if (!QueryFullProcessImageNameW(process, 0, actual, &chars) || !ProcessIdToSessionId(entry.th32ProcessID, &session)) error = GetLastError();
-            else if (_wcsicmp(actual, expected.c_str()) || session != ownSession) error = ERROR_BUSY;
-            if (error) { CloseHandle(process); break; }
-            running.push_back({entry.th32ProcessID, process});
-        } while (Process32NextW(snapshot, &entry));
-        if (!error && GetLastError() != ERROR_NO_MORE_FILES) error = GetLastError();
-        CloseHandle(snapshot);
-        // Inspect every candidate before sending any close request; never kill by basename.
-        if (!error) {
-            for (const auto& process : running) {
-                EnumWindows([](HWND window, LPARAM context) -> BOOL {
-                    DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
-                    if (pid == static_cast<DWORD>(context)) PostMessageW(window, WM_CLOSE, 0, 0);
-                    return TRUE;
-                }, static_cast<LPARAM>(process.pid));
+        BOOL found = Process32FirstW(snapshot, &entry);
+        if (!found && GetLastError() != ERROR_NO_MORE_FILES) error = GetLastError();
+        while (found) {
+            if (!_wcsicmp(entry.szExeFile, L"DesktopSplitter.exe") || !_wcsicmp(entry.szExeFile, L"dscomp.exe")) {
+                HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, entry.th32ProcessID);
+                if (!process) { error = GetLastError(); break; }
+                wchar_t actual[32768] = {}; DWORD chars = ARRAYSIZE(actual), session = 0;
+                std::wstring expected = std::wstring(InstallDir) + L"\\" + entry.szExeFile;
+                FILETIME created = {}, exit = {}, kernel = {}, user = {};
+                if (!QueryFullProcessImageNameW(process, 0, actual, &chars) || !ProcessIdToSessionId(entry.th32ProcessID, &session) ||
+                    !GetProcessTimes(process, &created, &exit, &kernel, &user)) error = GetLastError();
+                else if (_wcsicmp(actual, expected.c_str()) || session != ownSession) error = ERROR_BUSY;
+                if (Sink) Sink->OnDetail((L"Process candidate PID=" + std::to_wstring(entry.th32ProcessID) + L" path=" + actual + L" session=" + std::to_wstring(session) + L" identity_error=" + std::to_wstring(error)).c_str());
+                if (error) { CloseHandle(process); break; }
+                running.push_back({entry.th32ProcessID, process, created, actual});
             }
-            ULONGLONG deadline = GetTickCount64() + 5000;
+            found = Process32NextW(snapshot, &entry);
+            if (!found && GetLastError() != ERROR_NO_MORE_FILES) error = GetLastError();
+        }
+        CloseHandle(snapshot);
+        // Validate every candidate first. Let the app restore displays before stopping dscomp.
+        std::stable_sort(running.begin(), running.end(), [](const Running& a, const Running& b) {
+            bool appA = _wcsicmp(a.path.substr(a.path.find_last_of(L'\\') + 1).c_str(), L"DesktopSplitter.exe") == 0;
+            bool appB = _wcsicmp(b.path.substr(b.path.find_last_of(L'\\') + 1).c_str(), L"DesktopSplitter.exe") == 0;
+            return appA && !appB;
+        });
+        if (!error) {
+            const UINT exitMessage = RegisterWindowMessageW(L"DesktopSplitter.InstallerExit.v1");
+            struct CloseContext { DWORD pid; UINT message; bool busy = false, acknowledged = false; };
             for (const auto& process : running) {
-                DWORD remaining = GetTickCount64() >= deadline ? 0 : static_cast<DWORD>(deadline - GetTickCount64());
-                DWORD wait = WaitForSingleObject(process.process, remaining);
-                if (wait != WAIT_OBJECT_0) { error = wait == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError(); break; }
-                ++*pStoppedCount;
+                if (WaitForSingleObject(process.process, 0) == WAIT_OBJECT_0) { ++*pStoppedCount; continue; }
+                CloseContext context = {process.pid, exitMessage};
+                EnumWindows([](HWND window, LPARAM value) -> BOOL {
+                    auto& ctx = *reinterpret_cast<CloseContext*>(value);
+                    DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+                    if (pid != ctx.pid) return TRUE;
+                    DWORD_PTR reply = 0;
+                    if (ctx.message && SendMessageTimeoutW(window, ctx.message, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &reply)) {
+                        if (reply == 2) { ctx.busy = true; return FALSE; }
+                        if (reply == 1) { ctx.acknowledged = true; return TRUE; }
+                    }
+                    PostMessageW(window, WM_CLOSE, 0, 0);
+                    return TRUE;
+                }, reinterpret_cast<LPARAM>(&context));
+                if (context.busy) { error = ERROR_BUSY; if (Sink) Sink->OnError(L"Application refused installer shutdown while Apply/Revert is running; no forced termination."); break; }
+                DWORD wait = WaitForSingleObject(process.process, context.acknowledged ? 25000 : 1500);
+                if (wait == WAIT_TIMEOUT && !context.acknowledged) {
+                    DWORD session = 0; wchar_t key[CCH_RM_SESSION_KEY + 1] = {};
+                    error = RmStartSession(&session, 0, key);
+                    if (!error) {
+                        RM_UNIQUE_PROCESS application = {process.pid, process.created};
+                        error = RmRegisterResources(session, 0, nullptr, 1, &application, 0, nullptr);
+                        if (!error) error = RmShutdown(session, 0, nullptr); // Never RmForceShutdown.
+                        if (Sink) Sink->OnDetail((L"Restart Manager graceful shutdown PID=" + std::to_wstring(process.pid) + L" Win32=" + std::to_wstring(error)).c_str());
+                        DWORD ended = RmEndSession(session); if (!error) error = ended;
+                    }
+                    wait = WaitForSingleObject(process.process, error ? 0 : 15000);
+                }
+                if (Sink) Sink->OnDetail((L"Shutdown result PID=" + std::to_wstring(process.pid) + L" path=" + process.path + L" IPC_ack=" + std::to_wstring(context.acknowledged) + L" wait=" + std::to_wstring(wait)).c_str());
+                if (wait == WAIT_OBJECT_0) ++*pStoppedCount;
+                else if (!error) error = wait == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError();
+                if (error) break;
             }
         }
         for (const auto& process : running) CloseHandle(process.process);

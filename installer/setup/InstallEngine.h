@@ -30,6 +30,8 @@ namespace DeskSplit
         ExitRegistrationFailed = 14,
         ExitLogFailed = 15,
         ExitPendingRemoval = 16,
+        ExitSetupHandoff = 17,
+        ExitSetupBusy = 18,
         ExitRestartRequired = 3010,
     };
 

@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <functional>
 #include <cstring>
+#include "../../installer/setup/SetupRuntime.h"
 using namespace DeskSplit;
 void Check(bool value) { if (!value) throw std::runtime_error("assertion failed"); }
 void Write(const std::wstring& path, const char* bytes) {
@@ -21,7 +22,58 @@ struct Sink : IStepSink {
     void OnProgress(int) override {}
     bool ConfirmCertificateTrust(const CertificateSummary&) override { return false; }
 };
-int wmain() {
+namespace {
+std::wstring fixtureMode;
+LRESULT CALLBACK FixtureWindow(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == RegisterWindowMessageW(L"DesktopSplitter.InstallerExit.v1")) {
+        if (fixtureMode == L"busy") return 2;
+        if (fixtureMode == L"ipc") { PostQuitMessage(0); return 1; }
+        return 0;
+    }
+    if (message == WM_CLOSE) return 0; // Reproduce a legacy tray app.
+    if (message == WM_QUERYENDSESSION) return TRUE;
+    if (message == WM_ENDSESSION && wparam) { PostQuitMessage(0); return 0; }
+    if (message == WM_APP + 1) { PostQuitMessage(0); return 0; }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+int RunFixture(const wchar_t* mode, const wchar_t* eventName) {
+    fixtureMode = mode;
+    WNDCLASSW cls = {}; cls.lpfnWndProc = FixtureWindow; cls.lpszClassName = L"DS.Setup.ProcessFixture"; cls.hInstance = GetModuleHandleW(nullptr);
+    Check(RegisterClassW(&cls) != 0);
+    HWND window = CreateWindowW(cls.lpszClassName, L"DS test fixture", 0, 0, 0, 0, 0, nullptr, nullptr, cls.hInstance, nullptr);
+    Check(window != nullptr);
+    HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, eventName); Check(event != nullptr); Check(SetEvent(event)); CloseHandle(event);
+    MSG message = {}; while (GetMessageW(&message, nullptr, 0, 0) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
+    DestroyWindow(window); return 0;
+}
+struct Fixture {
+    PROCESS_INFORMATION process = {};
+    Fixture(const std::wstring& directory, const wchar_t* mode) {
+        wchar_t self[MAX_PATH] = {}; Check(GetModuleFileNameW(nullptr, self, ARRAYSIZE(self)) != 0);
+        std::wstring exe = directory + L"\\DesktopSplitter.exe";
+        Check(CopyFileW(self, exe.c_str(), FALSE));
+        static unsigned serial = 0;
+        std::wstring name = L"Local\\DS.ProcessFixture." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(++serial);
+        HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, name.c_str()); Check(ready != nullptr);
+        std::wstring command = L"\"" + exe + L"\" --fixture " + mode + L" " + name;
+        STARTUPINFOW startup = {}; startup.cb = sizeof(startup);
+        Check(CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, directory.c_str(), &startup, &process));
+        Check(WaitForSingleObject(ready, 10000) == WAIT_OBJECT_0); CloseHandle(ready);
+    }
+    ~Fixture() {
+        EnumWindows([](HWND window, LPARAM pidValue) -> BOOL {
+            DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+            if (pid == static_cast<DWORD>(pidValue)) PostMessageW(window, WM_APP + 1, 0, 0);
+            return TRUE;
+        }, static_cast<LPARAM>(process.dwProcessId));
+        WaitForSingleObject(process.hProcess, 5000);
+        CloseHandle(process.hThread); CloseHandle(process.hProcess);
+    }
+};
+}
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 4 && !wcscmp(argv[1], L"--fixture")) return RunFixture(argv[2], argv[3]);
+
     int count = 0;
     auto test = [&](const char* name, const std::function<void()>& run) { run(); ++count; std::cout << "PASS " << name << '\n'; };
     wchar_t temp[MAX_PATH] = {}, root[MAX_PATH] = {};
@@ -67,8 +119,35 @@ int wmain() {
         Check(GetFileAttributesW(installed.c_str()) == INVALID_FILE_ATTRIBUTES);
         Check(GetFileAttributesW((target + L"\\user.txt").c_str()) != INVALID_FILE_ATTRIBUTES);
     });
+    test("locked setup is detected before any PnP mutation", [&] {
+        Write(installed, "locked");
+        HANDLE lock = CreateFileW(installed.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        Check(lock != INVALID_HANDLE_VALUE);
+        DWORD error = CheckProductFilesWritable(target.c_str(), &sink); CloseHandle(lock);
+        Check(error != 0 && sink.errors.find(installed) != std::wstring::npos);
+        Check(DeleteFileW(installed.c_str()));
+    });
+    test("installer IPC closes a tray app without WM_CLOSE", [&] {
+        Fixture child(base, L"ipc"); int stopped = 0;
+        Check(QuiesceProductProcesses(base.c_str(), &stopped, &sink) == 0 && stopped == 1);
+    });
+    test("Restart Manager closes a legacy app that ignores WM_CLOSE", [&] {
+        Fixture child(base, L"legacy"); int stopped = 0;
+        Check(QuiesceProductProcesses(base.c_str(), &stopped, &sink) == 0 && stopped == 1);
+    });
+    test("busy application refuses shutdown without being killed", [&] {
+        Fixture child(base, L"busy"); int stopped = 0;
+        Check(QuiesceProductProcesses(base.c_str(), &stopped, &sink) == ERROR_BUSY && stopped == 0);
+        Check(WaitForSingleObject(child.process.hProcess, 0) == WAIT_TIMEOUT);
+    });
+    test("same basename outside installation directory is never closed", [&] {
+        Fixture child(base, L"ipc"); int stopped = 0;
+        Check(QuiesceProductProcesses(target.c_str(), &stopped, &sink) == ERROR_BUSY && stopped == 0);
+        Check(WaitForSingleObject(child.process.hProcess, 0) == WAIT_TIMEOUT);
+    });
+    Check(DeleteFileW((base + L"\\DesktopSplitter.exe").c_str()));
     Check(SetFileAttributesW(original.c_str(), FILE_ATTRIBUTE_NORMAL));
     Check(DeleteFileW(original.c_str()) && DeleteFileW(file.c_str()) && DeleteFileW((target + L"\\user.txt").c_str()));
     Check(RemoveDirectoryW(backup.c_str()) && RemoveDirectoryW(target.c_str()) && RemoveDirectoryW(root));
-    std::cout << count << " Windows file maintenance tests passed; temporary files only, no PnP/registry writes\n";
+    std::cout << count << " Windows file maintenance tests passed; temporary files and controlled child processes only, no PnP/registry writes\n";
 }

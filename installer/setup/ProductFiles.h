@@ -17,6 +17,7 @@ namespace DeskSplit
     extern const wchar_t kProductVersion[];
 
     struct IStepSink;
+    DWORD CheckProductFilesWritable(const wchar_t* InstallDir, IStepSink* Sink);
     DWORD PrepareProductFile(const wchar_t* Path, IStepSink* Sink = nullptr);
     DWORD CheckPendingProductRemoval(const wchar_t* InstallDir, IStepSink* Sink);
 
@@ -62,7 +63,7 @@ namespace DeskSplit
     DWORD RemoveProductFiles(_In_z_ const wchar_t* InstallDir, IStepSink* Sink = nullptr);
 
     // Upgrade path: exact executable path + current session, graceful only, bounded wait.
-    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount);
+    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount, IStepSink* Sink = nullptr);
 
     // Stops DesktopSplitter.exe / dscomp.exe before an upgrade or uninstall.
     void StopRunningProcesses(_Out_ int* pStoppedCount);

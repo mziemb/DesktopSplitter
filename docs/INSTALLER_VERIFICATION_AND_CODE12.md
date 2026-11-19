@@ -229,3 +229,50 @@ files. These tests do not invoke installation, PnP, delayed deletion or registry
 writes. Acceptance on Windows 11: uninstall from the installed setup, confirm 3010
 and the removal-specific message, attempt reinstall before restart (exit 16 before
 PnP), restart, then reinstall and run final verification. Keep logs for each step.
+
+## Follow-up: tray shutdown and setup self-lock
+
+The November 19 log stops after five seconds with ERROR_BUSY (170). The previous
+WM_CLOSE request was handled by MainWindow.OnClosing as minimize-to-tray, so it
+could not implement installer shutdown. This was an application lifetime issue,
+not evidence of a PnP fault.
+
+The app now exposes an installer-specific registered window message, including
+when launched hidden at startup. It refuses the request during Apply/Revert;
+otherwise it uses normal App.ExitApplication teardown instead of hiding. Setup
+validates every candidate's executable path, session and creation time before
+requesting shutdown, closes the application before the compositor, and waits for
+process handles. Legacy tray apps use Restart Manager with exact PID/creation
+identities, without RmForceShutdown or basename termination. PID, path, IPC reply,
+Restart Manager result and wait result are retained in the log. Unresponsive or
+busy components still stop installation safely.
+
+Shutdown now precedes display-recovery checks. After the owning app exits, setup
+rechecks hidden-display ownership and PnP/active virtual-monitor state. If recovery
+did not finish, setup stops and retains recovery information and helpers. Known
+product files are probed for writable access without truncation before any driver
+staging/binding, so a remaining file lock has a named diagnostic at preflight.
+
+A GUI setup/uninstaller launched from its registered/default installed location
+copies itself into a unique admin/SYSTEM-only ProgramData/SetupSessions directory.
+The child inherits only a parent process handle, waits for that process to exit,
+and then performs the requested operation. Thus the installed EXE is not kept
+mapped by a waiting bootstrap process. The original launcher returns explicit
+exit 17 (handoff, not installation success); the child GUI owns the final result.
+Temporary worker cleanup is scheduled for a later reboot, without declaring that
+this cache cleanup itself requires an immediate restart. Quiet mode from the
+installed EXE returns 17 with instructions to run an external copy instead; it
+does not claim a synchronous success before another process finishes. Package
+scripts should use the downloaded/build installer outside the product directory.
+A machine-wide setup mutex prevents concurrent new-version install/uninstall
+operations (exit 18 if another setup is active); other installers are never killed
+in the middle of driver operations.
+
+Windows regression fixtures cover installer IPC, a legacy window ignoring WM_CLOSE,
+busy refusal, an executable with the same basename outside the product directory,
+and detection of a locked setup before PnP changes. Fixtures use temporary files
+and controlled child processes, never actual installation or display APIs.
+Real Windows 11 acceptance still includes app-to-tray, active split restoration,
+installed-path GUI uninstall/handoff, a second setup window, and external quiet
+installation. A hung older app may still refuse graceful Restart Manager shutdown;
+setup then fails with evidence instead of forcibly interrupting display recovery.

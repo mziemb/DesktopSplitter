@@ -177,6 +177,10 @@ StageResult VerifyProductFiles(const wchar_t* directory) {
     return error ? Error(error, L"Installed setup executable differs from this installer") : StageResult::Pass();
 }
 StageResult CheckUpgradeState(const wchar_t* directory, IStepSink* sink) {
+    int stopped = 0;
+    DWORD shutdownError = QuiesceProductProcesses(directory, &stopped, sink);
+    if (shutdownError) return Error(shutdownError, L"A verified DesktopSplitter component did not exit after installer IPC / Restart Manager shutdown. See PID, path and wait results above; no forced termination was performed.");
+    sink->OnDetail((L"Gracefully closed components: " + std::to_wstring(stopped)).c_str());
     wchar_t appdata[MAX_PATH] = {};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata)))
         return Error(ERROR_PATH_NOT_FOUND, L"Cannot inspect the current user's display recovery state");
@@ -212,11 +216,8 @@ StageResult CheckUpgradeState(const wchar_t* directory, IStepSink* sink) {
         if (!probe.ok && !present[0].Problem) return probe;
         if (!probe.ok) sink->OnDetail((L"Existing device is not healthy; repair may proceed after process checks: " + probe.detail).c_str());
     }
-    int stopped = 0;
-    error = QuiesceProductProcesses(directory, &stopped);
-    if (error) return Error(error, L"A DesktopSplitter component is running or could not close safely. Use Revert and Exit in its tray menu; no forced termination was performed.");
-    sink->OnDetail((L"Gracefully closed components: " + std::to_wstring(stopped)).c_str());
-    return StageResult::Pass();
+    error = CheckProductFilesWritable(directory, sink);
+    return error ? Error(error, L"Product files remain locked or not writable after component shutdown; see exact path above") : StageResult::Pass();
 }
 StageResult BackUpProductFiles(const wchar_t* directory, std::wstring& backup) {
     wchar_t common[MAX_PATH] = {}; if (FAILED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, SHGFP_TYPE_CURRENT, common))) return Error(ERROR_PATH_NOT_FOUND, L"ProgramData unavailable");
