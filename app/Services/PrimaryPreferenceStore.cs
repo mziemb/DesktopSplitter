@@ -13,7 +13,7 @@ public sealed class PrimaryPreferenceStore
     public string FilePath => _path;
     private static void Validate(PrimaryMonitorState state)
     {
-        if (state.SchemaVersion != 1 || string.IsNullOrEmpty(state.PreSplitId) || string.IsNullOrEmpty(state.DesiredId) || string.IsNullOrEmpty(state.SplitPhysicalId))
+        if (state.SchemaVersion != 1 || string.IsNullOrEmpty(state.SessionId) || string.IsNullOrEmpty(state.PreSplitId) || string.IsNullOrEmpty(state.DesiredId) || string.IsNullOrEmpty(state.SplitPhysicalId))
             throw new InvalidDataException("Unknown primary preference schema/identity; retained for recovery.");
     }
     public PrimaryPreferenceStore(string path) => _path = path;
@@ -21,8 +21,11 @@ public sealed class PrimaryPreferenceStore
     private PrimaryMonitorState? ReadCore()
     {
         if (!File.Exists(_path)) return null;
-        var state = JsonSerializer.Deserialize<PrimaryMonitorState>(File.ReadAllText(_path))
+        using var document = JsonDocument.Parse(File.ReadAllText(_path));
+        var state = document.RootElement.Deserialize<PrimaryMonitorState>()
             ?? throw new InvalidDataException("Invalid primary preferences; refusing to replace them.");
+        if (!document.RootElement.TryGetProperty(nameof(PrimaryMonitorState.SessionId), out _))
+            state = state with { SessionId = "legacy:" + state.PreSplitId + "|" + state.SplitPhysicalId };
         Validate(state);
         return state;
     }

@@ -4,6 +4,7 @@ namespace DesktopSplitter.Models;
 public sealed record PrimaryMonitorState
 {
     public int SchemaVersion { get; init; } = 1;
+    public string SessionId { get; init; } = Guid.NewGuid().ToString("N");
     public string PreSplitId { get; init; } = string.Empty;
     public string SplitPhysicalId { get; init; } = string.Empty;
     public string DesiredId { get; init; } = string.Empty;
@@ -17,7 +18,7 @@ public sealed record PrimaryMonitorState
         string original = previous is { SplitActive: true } or { RevertPending: true } ? previous.PreSplitId : currentPrimaryId;
         if (string.IsNullOrEmpty(original) || string.IsNullOrEmpty(splitId)) throw new InvalidOperationException("Primary identity is not confirmed.");
         bool keepManual = previous?.SplitActive == true && previous.ManualOverride;
-        return new PrimaryMonitorState { PreSplitId = original, SplitPhysicalId = splitId, SplitActive = true,
+        return new PrimaryMonitorState { SessionId = previous is { SplitActive: true, RevertPending: false } ? previous.SessionId : Guid.NewGuid().ToString("N"), PreSplitId = original, SplitPhysicalId = splitId, SplitActive = true,
             DesiredId = keepManual ? previous!.DesiredId : original,
             DesiredIsVirtual = keepManual && previous!.DesiredIsVirtual, ManualOverride = keepManual };
     }

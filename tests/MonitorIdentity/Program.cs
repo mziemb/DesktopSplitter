@@ -413,6 +413,16 @@ Test("a deferred manual write cannot overwrite a later explicit Revert", () => {
     Check(writeback.Flush(revert, _ => wrote = true) == revert && !wrote);
 });
 
+Test("session generation prevents a deferred preference leaking through Revert into a fresh split", () => {
+    var first = PrimaryMonitorState.BeginApply(null, "P", "S").CompleteApply("V1", new[] { "P", "S", "V1" });
+    var writeback = new PrimaryPreferenceWriteback();
+    try { writeback.Commit(first, first with { DesiredId = "Q" }, _ => throw new IOException()); } catch (IOException) { }
+    var fresh = PrimaryMonitorState.BeginApply(first.BeginRevert(), "P", "S").CompleteApply("V1", new[] { "P", "S", "V1" });
+    Check(fresh.SessionId != first.SessionId); bool wrote = false;
+    Check(writeback.Flush(fresh, _ => wrote = true) == fresh && !wrote);
+    Check(PrimaryMonitorState.BeginApply(first, "P", "S").SessionId == first.SessionId);
+});
+
 Console.WriteLine($"{passed} tests passed; no Windows display APIs were called.");
 
 sealed class FakeHotkeyBackend : IHotkeyBackend

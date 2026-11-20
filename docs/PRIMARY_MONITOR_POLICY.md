@@ -13,6 +13,8 @@ manual-preference write is retried before further automatic switching; it cannot
 make the reconciler restore the stale preference. A later Apply/Revert supersedes
 such a deferred write.
 
+- `SessionId`: identifies a split session across reapply/restart. A fresh Apply
+  after Revert gets a new generation, so stale deferred writes cannot cross sessions.
 - `PreSplitId`: the primary before the first Apply of this split session. Saved
   before driver/topology changes, and carried through repeated Apply.
 - `DesiredId`: the primary wanted during the split. Initially segment 1 if the
