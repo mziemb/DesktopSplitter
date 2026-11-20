@@ -26,13 +26,22 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <Product>DesktopSplitter</Product>
+    <Product>DesktopSplitter MZ</Product>
+    <BuildDateUtc>$([System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))</BuildDateUtc>
+    <BuildNumber Condition="'$(GITHUB_RUN_NUMBER)' != ''">$(GITHUB_RUN_NUMBER)</BuildNumber>
+    <BuildNumber Condition="'$(BuildNumber)' != '' And '$(GITHUB_RUN_ATTEMPT)' != ''">$(BuildNumber).$(GITHUB_RUN_ATTEMPT)</BuildNumber>
+    <BuildNumber Condition="'$(BuildNumber)' == ''">$([System.DateTime]::Parse('$(BuildDateUtc)').ToUniversalTime().ToString('yyyyMMddHHmmss'))</BuildNumber>
     <Company>DesktopSplitter</Company>
     <AssemblyTitle>DesktopSplitter control app</AssemblyTitle>
     <!-- WFAC010 tells WinForms apps to configure DPI via ApplicationHighDpiMode. This is a
          WPF app that only borrows NotifyIcon, so PerMonitorV2 belongs in app.manifest. -->
     <NoWarn>$(NoWarn);WFAC010</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="BuildDateUtc" Value="$(BuildDateUtc)" />
+    <AssemblyMetadata Include="BuildNumber" Value="$(BuildNumber)" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- tools\ holds standalone diagnostic programs (separate projects). They must never be

@@ -191,11 +191,11 @@ jobs:
           if (-not $version) { $version = (Get-Content 'build\generated\version.txt' -Raw).Trim() }
           if (-not $version) { throw 'could not determine product version' }
           "version=$version" >> $env:GITHUB_OUTPUT
-          Copy-Item 'installer\setup\bin\x64\Release\DesktopSplitterSetup.exe' "DesktopSplitterSetup-$version.exe"
+          Copy-Item 'installer\setup\bin\x64\Release\DesktopSplitterSetup.exe' "DesktopSplitterSetup-MZ-$version.exe"
 
       - name: Upload build artifact (not a public release)
         uses: actions/upload-artifact@v4
         with:
-          name: DesktopSplitterSetup-${{ steps.stamp.outputs.version }}
-          path: DesktopSplitterSetup-${{ steps.stamp.outputs.version }}.exe
+          name: DesktopSplitterSetup-MZ-${{ steps.stamp.outputs.version }}
+          path: DesktopSplitterSetup-MZ-${{ steps.stamp.outputs.version }}.exe
           compression-level: 0
