@@ -371,6 +371,27 @@ Test("manual physical-source primary survives reapply unless that source will be
     Check(manual.CompleteApply("V1", new[] { "P", "S", "V1" }, hidePhysical: true).DesiredId == "P");
 });
 
+Test("portrait screen left of primary cannot place its virtual group over physical screens", () => {
+    var physical = new[] { new PixelRect(-1080, 0, 1080, 1920), new PixelRect(0, 0, 1920, 1080), new PixelRect(1920, 0, 1920, 1080) };
+    var proposed = new[] { new PixelRect(0, 0, 1080, 640), new PixelRect(0, 640, 1080, 640), new PixelRect(0, 1280, 1080, 640) };
+    var offset = VirtualPlacementPolicy.Offset(proposed, physical);
+    int dx = offset.X; Check(offset.Y == 0);
+    Check(dx == 3840);
+    Check(proposed.All(v => physical.All(p => !VirtualPlacementPolicy.Overlaps(new PixelRect(v.X + dx, v.Y, v.W, v.H), p))));
+    Check(physical[1].X == 0 && physical[2].X == 1920);
+});
+Test("a virtual group that only touches physical edges needs no displacement", () => {
+    Check(VirtualPlacementPolicy.Offset(new[] { new PixelRect(1920, 0, 960, 1080) }, new[] { new PixelRect(0, 0, 1920, 1080) }) == (0, 0));
+});
+
+Test("collision displacement also connects the group to a vertically offset desktop edge", () => {
+    var physical = new[] { new PixelRect(0, 0, 1920, 1080), new PixelRect(1920, 4000, 1920, 1080) };
+    var proposed = new[] { new PixelRect(0, 0, 1080, 640), new PixelRect(0, 640, 1080, 640) };
+    var offset = VirtualPlacementPolicy.Offset(proposed, physical);
+    Check(offset == (3840, 4000));
+    Check(!VirtualPlacementPolicy.Overlaps(new PixelRect(offset.X, offset.Y, 1080, 640), physical[1]));
+});
+
 Console.WriteLine($"{passed} tests passed; no Windows display APIs were called.");
 
 sealed class FakeHotkeyBackend : IHotkeyBackend

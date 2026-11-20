@@ -263,7 +263,7 @@ public static class ApplyService
         MonitorInfo physicalNow = current.SingleOrDefault(m => m.StableMonitorId == physical.StableMonitorId)
             ?? throw new ApplyException($"{physical.DeviceName} is no longer active, so the split cannot be placed next to it.");
         IReadOnlyList<DisplayArranger.VirtualPlacement> placements =
-            DisplayArranger.ComputePlacements(physicalNow, layout, virtualMonitors, request.Resolutions);
+            DisplayArranger.ComputePlacements(physicalNow, layout, virtualMonitors, request.Resolutions, current);
         primaryState = primaryState.CompleteApply(virtualMonitors[0].StableMonitorId, current.Select(m => m.StableMonitorId).ToList(), request.HidePhysicalDisplay);
         PrimaryPreferenceStore.Default.Write(primaryState);
         var primaryNow = current.SingleOrDefault(m => m.StableMonitorId == primaryState.DesiredId);

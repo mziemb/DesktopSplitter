@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../app/Services/PrimaryChangeIntent.cs" Link="PrimaryChangeIntent.cs"/>
+    <Compile Include="../../app/Models/VirtualPlacementPolicy.cs" Link="VirtualPlacementPolicy.cs"/>
     <Compile Include="../../app/Models/PrimaryMonitorState.cs" Link="PrimaryMonitorState.cs"/>
     <Compile Include="../../app/Services/PrimaryPreferenceStore.cs" Link="PrimaryPreferenceStore.cs"/>
     <Compile Include="../../app/Models/RevertHotkey.cs" Link="RevertHotkey.cs"/>

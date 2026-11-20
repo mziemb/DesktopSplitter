@@ -44,7 +44,8 @@ public static class DisplayArranger
         MonitorInfo physical,
         LayoutDefinition layout,
         IReadOnlyList<MonitorInfo> virtualMonitors,
-        IReadOnlyList<(int Width, int Height)> resolutions)
+        IReadOnlyList<(int Width, int Height)> resolutions,
+        IReadOnlyList<MonitorInfo>? desktop = null)
     {
         if (virtualMonitors.Count != layout.SegmentCount)
             throw new DisplayArrangeException(
@@ -72,6 +73,13 @@ public static class DisplayArranger
             for (int r = 0; r < cell.Row; r++) y += rowHeight[r];
 
             placements.Add(new VirtualPlacement(virtualMonitors[i].DeviceName, w, h, x, y, cell.Col, cell.Row, virtualMonitors[i].StableMonitorId));
+        }
+        if (desktop is not null) {
+            var movingIds = virtualMonitors.Select(m => m.StableMonitorId).ToHashSet();
+            var fixedRects = desktop.Where(m => !m.IsDeskSplitVirtual && !movingIds.Contains(m.StableMonitorId))
+                .Select(m => new PixelRect(m.PositionX, m.PositionY, m.CurrentWidth, m.CurrentHeight)).ToList();
+            var offset = VirtualPlacementPolicy.Offset(placements.Select(p => new PixelRect(p.X, p.Y, p.Width, p.Height)).ToList(), fixedRects);
+            if (offset != (0, 0)) placements = placements.Select(p => p with { X = checked(p.X + offset.X), Y = checked(p.Y + offset.Y) }).ToList();
         }
         return placements;
     }

@@ -38,7 +38,11 @@ After a full Exit, pending restoration resumes the next time the app runs.
 The reconciler runs off the UI thread, wakes on display/lifecycle notifications
 and also polls. It uses the same display-operation gate as Apply/Revert. Stop does
 not leave a second worker competing with a delayed first worker. Switches resolve
-stable IDs to fresh Windows addresses and verify the resulting primary.
+stable IDs to fresh Windows addresses and verify the resulting primary. The virtual
+group is checked against existing screen rectangles: when the default position
+right of the split source overlaps a physical screen (as with a portrait screen
+left of the primary), only the virtual group moves beyond the existing desktop.
+Physical relative placement is preserved; primary rebasing is still one batch.
 
 Inputs include WM_DISPLAYCHANGE, WM_DEVICECHANGE, console display power state,
 Windows suspend/resume, session transitions and compositor secure-desktop events.
