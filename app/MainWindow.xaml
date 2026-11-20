@@ -234,6 +234,19 @@
                     </Border>
                 </StackPanel>
 
+                <TextBlock Text="PRIMARY DISPLAY" Style="{StaticResource SectionHeader}"/>
+                <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}"
+                        BorderThickness="1" CornerRadius="4" Padding="12,10" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="Changes made in Windows Display Settings are remembered during a split. Revert restores the primary from before the split."
+                                   TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
+                        <Button Content="Remember current Windows primary" Command="{Binding RememberPrimaryCommand}"
+                                HorizontalAlignment="Left" Margin="0,8,0,0"/>
+                        <TextBlock Text="Use this after changing primary with another display tool, or during a sleep/wake transition."
+                                   TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,6,0,0"/>
+                    </StackPanel>
+                </Border>
+
                 <TextBlock Text="STARTUP" Style="{StaticResource SectionHeader}"/>
                 <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}"
                         BorderThickness="1" CornerRadius="4" Padding="12,10" Margin="0,0,0,16">

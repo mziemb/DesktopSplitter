@@ -223,6 +223,154 @@ Test("three stacked preserves coverage after resizing and persists without renum
     Check((int)LayoutKind.TwoHorizontal == 1 && (int)LayoutKind.ThreeColumns == 2 && (int)LayoutKind.SixteenNineCenter == 6);
 });
 
+Test("splitting the primary selects segment one; splitting a secondary preserves the primary", () => {
+    var active = new[] { "P", "S", "V1", "V2" };
+    Check(PrimaryMonitorState.BeginApply(null, "P", "P").CompleteApply("V1", active).DesiredId == "V1");
+    Check(PrimaryMonitorState.BeginApply(null, "P", "S").CompleteApply("V1", active).DesiredId == "P");
+});
+Test("reapply preserves the original primary even after a physical manual override", () => {
+    var first = PrimaryMonitorState.BeginApply(null, "P", "S").CompleteApply("V1", new[] { "P", "S", "V1" });
+    var manual = first with { DesiredId = "Q", ManualOverride = true };
+    var again = PrimaryMonitorState.BeginApply(manual, "Q", "S").CompleteApply("V1", new[] { "P", "S", "Q", "V1" });
+    Check(again.PreSplitId == "P" && again.DesiredId == "Q");
+    Check(again.BeginRevert().DesiredId == "P");
+});
+var primaryTime = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+List<PrimaryObservation> Desktop(string primary, params string[] ids) => ids.Select(id =>
+    new PrimaryObservation(id, id == primary, id.StartsWith("V"), 1920, 1080)).ToList();
+PrimaryMonitorState Session(string desired = "P") => new() { PreSplitId = "P", SplitPhysicalId = "S", DesiredId = desired, DesiredIsVirtual = desired.StartsWith("V"), SplitActive = true };
+Test("offline primary and Windows fallback never overwrite preference; reconnect restores original ID", () => {
+    var tracker = new PrimaryPreferenceTracker(); var state = Session();
+    tracker.Observe(state, Desktop("P", "P", "S", "V1"), primaryTime, false, false, false);
+    var offline = tracker.Observe(state, Desktop("S", "S", "V1"), primaryTime.AddSeconds(10), true, true, false);
+    Check(offline.State.DesiredId == "P" && offline.TargetId == "");
+    tracker.Observe(state, Desktop("S", "P", "S", "V1"), primaryTime.AddSeconds(20), true, true, false);
+    var returned = tracker.Observe(state, Desktop("S", "P", "S", "V1"), primaryTime.AddSeconds(24), false, false, false);
+    Check(returned.TargetId == "P" && !returned.State.ManualOverride);
+});
+Test("manual Windows primary on a settled topology is retained across sleep and wake", () => {
+    var tracker = new PrimaryPreferenceTracker(); var state = Session("V1");
+    tracker.Observe(state, Desktop("V1", "P", "Q", "V1"), primaryTime, false, false, false);
+    var manual = tracker.Observe(state, Desktop("Q", "P", "Q", "V1"), primaryTime.AddSeconds(10), true, false, false);
+    Check(manual.State.DesiredId == "Q" && manual.State.PreSplitId == "P" && manual.State.ManualOverride);
+    tracker.Observe(manual.State, Desktop("P", "P", "Q", "V1"), primaryTime.AddSeconds(20), true, true, false);
+    var wake = tracker.Observe(manual.State, Desktop("P", "P", "Q", "V1"), primaryTime.AddSeconds(24), false, false, false);
+    Check(wake.TargetId == "Q");
+    Check(manual.State.BeginRevert().DesiredId == "P");
+});
+Test("manual virtual segment choice survives secure desktop and resumes that segment", () => {
+    var tracker = new PrimaryPreferenceTracker(); var state = Session("V2") with { ManualOverride = true };
+    tracker.Observe(state, Desktop("V2", "P", "V1", "V2"), primaryTime, false, false, false);
+    var secure = tracker.Observe(state, Desktop("V2", "P", "V1", "V2"), primaryTime.AddSeconds(10), true, true, true);
+    Check(secure.TargetId == "P" && secure.State.DesiredId == "V2");
+    tracker.Observe(state, Desktop("P", "P", "V1", "V2"), primaryTime.AddSeconds(12), true, false, false);
+    Check(tracker.Observe(state, Desktop("P", "P", "V1", "V2"), primaryTime.AddSeconds(16), false, false, false).TargetId == "V2");
+});
+Test("Revert while original primary is offline preserves a pending restoration across restart", () => {
+    var pending = Session("V1").BeginRevert();
+    var restored = JsonSerializer.Deserialize<PrimaryMonitorState>(JsonSerializer.Serialize(pending))!;
+    var tracker = new PrimaryPreferenceTracker();
+    Check(tracker.Observe(restored, Desktop("S", "S"), primaryTime, true, true, false).State.RevertPending);
+    tracker.Observe(restored, Desktop("S", "P", "S"), primaryTime.AddSeconds(10), true, true, false);
+    Check(tracker.Observe(restored, Desktop("S", "P", "S"), primaryTime.AddSeconds(14), false, false, false).TargetId == "P");
+    Check(!tracker.Observe(restored, Desktop("P", "P", "S"), primaryTime.AddSeconds(15), true, false, false).State.RevertPending);
+});
+Test("own primary switch notification cannot be learned as a user override", () => {
+    var tracker = new PrimaryPreferenceTracker(); var state = Session("V1");
+    tracker.Observe(state, Desktop("V1", "P", "V1"), primaryTime, false, false, false);
+    tracker.OwnSwitch(primaryTime.AddSeconds(10));
+    var own = tracker.Observe(state, Desktop("P", "P", "V1"), primaryTime.AddSeconds(11), true, false, false);
+    Check(own.State.DesiredId == "V1" && !own.State.ManualOverride);
+});
+Test("unknown and duplicate identities block reconciliation without losing state", () => {
+    var tracker = new PrimaryPreferenceTracker(); var state = Session();
+    Check(tracker.Observe(state, Desktop("", "", "Q"), primaryTime, true, false, false).TargetId == "");
+    Check(tracker.Observe(state, Desktop("P", "P", "P"), primaryTime, true, false, false).State == state);
+});
+Test("enumeration order and GDI renumbering cannot change logical primary", () => {
+    var tracker = new PrimaryPreferenceTracker(); var state = Session();
+    tracker.Observe(state, Desktop("P", "P", "S"), primaryTime, false, false, false);
+    var reordered = tracker.Observe(state, Desktop("S", "S", "P"), primaryTime.AddSeconds(10), false, true, false);
+    Check(reordered.State.DesiredId == "P");
+    Check(tracker.Observe(state, Desktop("S", "S", "P"), primaryTime.AddSeconds(14), false, false, false).TargetId == "P");
+});
+Test("delayed display notification can still recognize a settled manual change", () => {
+    var tracker = new PrimaryPreferenceTracker(); var state = Session();
+    tracker.Observe(state, Desktop("P", "P", "Q"), primaryTime, false, false, false);
+    Check(tracker.Observe(state, Desktop("Q", "P", "Q"), primaryTime.AddSeconds(10), false, false, false).TargetId == "");
+    Check(tracker.Observe(state, Desktop("Q", "P", "Q"), primaryTime.AddSeconds(11), true, false, false).State.DesiredId == "Q");
+});
+Test("new layout dropping a preferred virtual segment falls back to the session default", () => {
+    var state = Session("V3") with { ManualOverride = true };
+    Check(state.CompleteApply("V1", new[] { "P", "S", "V1", "V2" }).DesiredId == "P");
+});
+Test("primary preference store is durable and corruption is not silently overwritten", () => {
+    string dir = Path.Combine(Path.GetTempPath(), "ds-primary-" + Guid.NewGuid());
+    Directory.CreateDirectory(dir);
+    try {
+        string path = Path.Combine(dir, "primary.json"); var store = new PrimaryPreferenceStore(path);
+        var state = Session("V2") with { ManualOverride = true };
+        store.Write(state); Check(new PrimaryPreferenceStore(path).Read() == state);
+        store.Write(state.BeginRevert()); Check(File.Exists(path + ".bak"));
+        File.WriteAllText(path, "broken"); bool refused = false;
+        try { store.Write(state); } catch (JsonException) { refused = true; }
+        Check(refused && File.ReadAllText(path) == "broken");
+    } finally { Directory.Delete(dir, true); }
+});
+
+Test("blank enumeration followed by a late fallback cannot become a manual preference", () => {
+    var tracker = new PrimaryPreferenceTracker(); var state = Session();
+    tracker.Observe(state, Desktop("P", "P", "Q"), primaryTime, false, false, false);
+    tracker.Observe(state, Array.Empty<PrimaryObservation>(), primaryTime.AddSeconds(10), true, true, false);
+    var back = tracker.Observe(state, Desktop("Q", "P", "Q"), primaryTime.AddSeconds(30), true, false, false);
+    Check(back.State.DesiredId == "P" && !back.State.ManualOverride);
+});
+Test("only a recent Windows Settings interaction qualifies as automatic manual intent", () => {
+    Check(PrimaryChangeIntent.IsSettingsInteraction("SystemSettings", 200));
+    Check(!PrimaryChangeIntent.IsSettingsInteraction("SystemSettings", 8000));
+    Check(!PrimaryChangeIntent.IsSettingsInteraction("explorer", 200));
+});
+Test("manual intent while the former primary is offline still retains the original for Revert", () => {
+    var tracker = new PrimaryPreferenceTracker(); var state = Session();
+    tracker.Observe(state, Desktop("R", "R", "Q"), primaryTime, false, true, false);
+    var manual = tracker.Observe(state, Desktop("Q", "R", "Q"), primaryTime.AddSeconds(10), true, false, false);
+    Check(manual.State.DesiredId == "Q" && manual.State.PreSplitId == "P");
+    Check(manual.State.BeginRevert().DesiredId == "P");
+});
+Test("after Revert the physical preference is still restored on later reconnect", () => {
+    var state = Session().BeginRevert() with { RevertPending = false };
+    var tracker = new PrimaryPreferenceTracker();
+    tracker.Observe(state, Desktop("P", "P", "Q"), primaryTime, false, false, false);
+    tracker.Observe(state, Desktop("Q", "Q"), primaryTime.AddSeconds(10), false, true, false);
+    tracker.Observe(state, Desktop("Q", "P", "Q"), primaryTime.AddSeconds(20), false, true, false);
+    Check(tracker.Observe(state, Desktop("Q", "P", "Q"), primaryTime.AddSeconds(24), false, false, false).TargetId == "P");
+});
+
+Test("automatic exit teardown preserves manual split preference for the next startup", () => {
+    var saved = Session("Q") with { ManualOverride = true };
+    var exit = saved.CompleteTeardown(deliberate: false);
+    var restarted = JsonSerializer.Deserialize<PrimaryMonitorState>(JsonSerializer.Serialize(exit))!;
+    var reapplied = PrimaryMonitorState.BeginApply(restarted, "P", "S").CompleteApply("V1", new[] { "P", "S", "Q", "V1" });
+    Check(reapplied.PreSplitId == "P" && reapplied.DesiredId == "Q" && reapplied.ManualOverride);
+    Check(saved.CompleteTeardown(deliberate: true).DesiredId == "P");
+});
+Test("repeated power-off events keep automatic fallback out of the saved preference", () => {
+    var tracker = new PrimaryPreferenceTracker(); var state = Session();
+    tracker.Observe(state, Desktop("P", "P", "Q"), primaryTime, false, false, false);
+    for (int seconds = 10; seconds < 30; seconds++) {
+        var off = tracker.Observe(state, Desktop("Q", "P", "Q"), primaryTime.AddSeconds(seconds), false, true, false);
+        Check(off.State.DesiredId == "P" && off.TargetId == "");
+    }
+    tracker.Observe(state, Desktop("Q", "P", "Q"), primaryTime.AddSeconds(30), false, true, false);
+    Check(tracker.Observe(state, Desktop("Q", "P", "Q"), primaryTime.AddSeconds(34), false, false, false).TargetId == "P");
+});
+
+Test("manual physical-source primary survives reapply unless that source will be hidden", () => {
+    var manual = Session("S") with { ManualOverride = true };
+    Check(manual.CompleteApply("V1", new[] { "P", "S", "V1" }).DesiredId == "S");
+    Check(manual.CompleteApply("V1", new[] { "P", "S", "V1" }, hidePhysical: true).DesiredId == "P");
+});
+
 Console.WriteLine($"{passed} tests passed; no Windows display APIs were called.");
 
 sealed class FakeHotkeyBackend : IHotkeyBackend

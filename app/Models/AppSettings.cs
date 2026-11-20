@@ -38,7 +38,7 @@ public sealed class AppSettings
     [JsonPropertyName("previousPrimaryFriendlyName")]
     public string PreviousPrimaryFriendlyName { get; set; } = string.Empty;
 
-    /// <summary>Device name of the virtual monitor that Apply promoted to primary (segment 1).</summary>
+    /// <summary>Legacy diagnostic address of the primary selected by Apply; primary-preferences.json owns durable intent.</summary>
     [JsonPropertyName("appliedPrimaryDevice")]
     public string AppliedPrimaryDevice { get; set; } = string.Empty;
 

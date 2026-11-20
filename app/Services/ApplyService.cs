@@ -59,7 +59,8 @@ public sealed record AppliedSnapshot(
     string PhysicalDevice,
     LayoutKind Layout,
     IReadOnlyList<(int Width, int Height)> Resolutions,
-    bool HidePhysicalDisplay)
+    bool HidePhysicalDisplay,
+    PrimaryMonitorState? PrimaryState = null)
 {
     public static readonly AppliedSnapshot None =
         new(false, string.Empty, LayoutKind.TwoVertical, Array.Empty<(int, int)>(), false);
@@ -182,8 +183,7 @@ public static class ApplyService
         // Layout staging touches every active source, so require all physical identities up front.
         foreach (var monitor in DisplayConfig.Enumerate().Where(m => !m.IsDeskSplitVirtual))
             _ = MonitorIdentityStore.Resolve(RequireIdentity(monitor));
-        if (!string.IsNullOrEmpty(preflight?.PreviousPrimaryStableMonitorId))
-            _ = MonitorIdentityStore.Resolve(preflight.PreviousPrimaryStableMonitorId, requireActive: false);
+        // An offline saved primary is a pending preference, not a reason to forget it.
         LayoutDefinition layout = request.Layout;
         int segmentCount = layout.SegmentCount;
 
@@ -197,6 +197,10 @@ public static class ApplyService
         // Remember which display was primary BEFORE we touch anything — Revert restores
         // exactly this monitor, which is not necessarily the one being split.
         (string previousPrimaryDevice, string previousPrimaryName) = CapturePreviousPrimary(before, log);
+        var primaryState = PrimaryMonitorState.BeginApply(PrimaryPreferenceStore.Default.Read(), previousPrimaryDevice, physical.StableMonitorId);
+        PrimaryPreferenceStore.Default.Write(primaryState); // Durable BEFORE driver/topology changes.
+        log.Report($"Saved pre-split primary {primaryState.PreSplitId}: {PrimaryPreferenceStore.Default.FilePath}");
+        previousPrimaryDevice = primaryState.PreSplitId;
 
         // 0. A compositor from a previous run must not be holding duplication handles on
         //    monitors we are about to tear down.
@@ -251,21 +255,25 @@ public static class ApplyService
         // identified by the EDID serial the driver stamps (0xD5000001 + index).
         IReadOnlyList<MonitorInfo> virtualMonitors = MapSegmentsToMonitors(arrived, segmentCount, log, ct);
 
-        // c. Arrange them contiguously to the right of the physical monitor and promote
-        //    segment 1's virtual monitor to PRIMARY, in one batch. The shell anchors the Start
-        //    menu, Alt-Tab switcher and most centred dialogs to the primary display; leaving
-        //    the physical monitor primary drew them across the whole panel, behind/around
-        //    the compositor's output instead of inside a segment.
-        //    Windows restores the layout it remembers for this set of monitors as they arrive
-        //    (typically segment 1 already primary and the physical monitor moved left of it),
-        //    so positions are computed from where the physical monitor is NOW.
+        // c. Preserve the pre-split physical primary when splitting a secondary display.
+        // Only splitting the primary promotes virtual segment 1. Repeated Apply retains
+        // the original Revert target and any still-valid manual primary preference.
         log.Report("Arranging virtual monitors in the virtual desktop...");
         IReadOnlyList<MonitorInfo> current = DisplayConfig.Enumerate();
         MonitorInfo physicalNow = current.SingleOrDefault(m => m.StableMonitorId == physical.StableMonitorId)
             ?? throw new ApplyException($"{physical.DeviceName} is no longer active, so the split cannot be placed next to it.");
         IReadOnlyList<DisplayArranger.VirtualPlacement> placements =
             DisplayArranger.ComputePlacements(physicalNow, layout, virtualMonitors, request.Resolutions);
-        string appliedPrimaryDevice = virtualMonitors[0].DeviceName;
+        primaryState = primaryState.CompleteApply(virtualMonitors[0].StableMonitorId, current.Select(m => m.StableMonitorId).ToList(), request.HidePhysicalDisplay);
+        PrimaryPreferenceStore.Default.Write(primaryState);
+        var primaryNow = current.SingleOrDefault(m => m.StableMonitorId == primaryState.DesiredId);
+        // Keep the offline preference, but use Windows' present primary until it returns.
+        primaryNow ??= current.SingleOrDefault(m => m.IsPrimary);
+        if (primaryNow is null) throw new ApplyException("The current primary cannot be identified.");
+        if (request.HidePhysicalDisplay && primaryNow.StableMonitorId == physical.StableMonitorId)
+            primaryNow = virtualMonitors[0]; // Only a non-primary source can be specialized.
+        string appliedPrimaryDevice = primaryNow.DeviceName;
+        log.Report($"Primary: pre-split={primaryState.PreSplitId}, desired={primaryState.DesiredId}, current target={primaryNow.StableMonitorId}.");
         DisplayArranger.ApplyLayout(
             DisplayArranger.ComposeLayout(current, placements, physical.MaxRefreshHz, appliedPrimaryDevice),
             log.Report);
@@ -310,7 +318,7 @@ public static class ApplyService
         // e. Optionally hide the physical monitor, then launch the compositor.
         //    Ordering matters: the display must already be specialized when dscomp starts, and
         //    only a NON-primary display can be specialized — which is exactly why this runs
-        //    after segment 1 was promoted to primary in step c2.
+        //    after the intended primary was selected above.
         (Process compositor, string specializedDevice) = LaunchCompositor(request, log, ct);
 
         // f. Remember the settings for next launch / tray "Apply last".
@@ -320,7 +328,7 @@ public static class ApplyService
             IdentitySchemaVersion = 1,
             PhysicalStableMonitorId = physical.StableMonitorId,
             PreviousPrimaryStableMonitorId = previousPrimaryDevice,
-            AppliedPrimaryStableMonitorId = virtualMonitors[0].StableMonitorId,
+            AppliedPrimaryStableMonitorId = primaryState.DesiredId,
             SpecializedStableMonitorId = specializedDevice,
             PhysicalDevice = physical.DeviceName,
             PhysicalFriendlyName = physical.FriendlyName,
@@ -400,16 +408,17 @@ public static class ApplyService
     {
         AppSettings? settings = SettingsStore.Load();
         if (settings is null || string.IsNullOrEmpty(settings.PhysicalDevice) || settings.Segments.Count == 0)
-            return AppliedSnapshot.None;
+            return AppliedSnapshot.None with { PrimaryState = PrimaryPreferenceStore.Default.Read() };
         if (!HidingStatus.IsSplitActive())
-            return AppliedSnapshot.None;
+            return AppliedSnapshot.None with { PrimaryState = PrimaryPreferenceStore.Default.Read() };
 
         return new AppliedSnapshot(
             true,
             settings.PhysicalStableMonitorId,
             settings.Layout,
             settings.Segments.Select(s => (s.Width, s.Height)).ToList(),
-            settings.HidePhysicalDisplay);
+            settings.HidePhysicalDisplay,
+            PrimaryPreferenceStore.Default.Read());
     }
 
     /// <summary>
@@ -418,6 +427,11 @@ public static class ApplyService
     /// user in a loop of countdowns).
     /// </summary>
     private static string RollBackTo(
+        AppliedSnapshot snapshot, IProgress<string> log, CancellationToken ct, ISpecializationUi? ui)
+    {
+        lock (DisplayOperationGate) return RollBackToCore(snapshot, log, ct, ui);
+    }
+    private static string RollBackToCore(
         AppliedSnapshot snapshot, IProgress<string> log, CancellationToken ct, ISpecializationUi? ui)
     {
         if (!snapshot.WasApplied)
@@ -448,28 +462,39 @@ public static class ApplyService
             PromptToConfirm = false,
         }, log, ct);
 
+        if (snapshot.PrimaryState is not null) {
+            PrimaryPreferenceStore.Default.Write(snapshot.PrimaryState);
+            try { SwitchPrimary(snapshot.PrimaryState.DesiredId, "the previous split primary", log); }
+            catch (InvalidOperationException ex) { log.Report("Previous primary remains pending: " + ex.Message); }
+        }
         return $"{layout.Name} on {physical.DisplayLabel}";
     }
 
     // ------------------------------------------------------------------ revert
 
-    public static void Revert(IProgress<string> log, CancellationToken ct, ISpecializationUi? ui = null)
+    public static void Revert(IProgress<string> log, CancellationToken ct, ISpecializationUi? ui = null, bool deliberate = true)
     {
         lock (DisplayOperationGate)
         {
-            RevertCore(log, ct, ui);
+            RevertCore(log, ct, ui, deliberate);
         }
     }
 
-    private static void RevertCore(IProgress<string> log, CancellationToken ct, ISpecializationUi? ui)
+    private static void RevertCore(IProgress<string> log, CancellationToken ct, ISpecializationUi? ui, bool deliberate)
     {
         AppSettings? state = SettingsStore.Load();
         if (state is null || !state.HasConfirmedIdentity)
             throw new ApplyException("Revert needs confirmed monitor identity; use Windows Settings for legacy recovery.");
-        _ = MonitorIdentityStore.Resolve(state.PhysicalStableMonitorId, requireActive: false);
-        if (!string.IsNullOrEmpty(state.PreviousPrimaryStableMonitorId))
-            _ = MonitorIdentityStore.Resolve(state.PreviousPrimaryStableMonitorId, requireActive: false);
-        if (!string.IsNullOrEmpty(state.SpecializedStableMonitorId))
+        if (PrimaryPreferenceStore.Default.Read() is null && !string.IsNullOrEmpty(state.PreviousPrimaryStableMonitorId))
+            PrimaryPreferenceStore.Default.Write(new PrimaryMonitorState { PreSplitId = state.PreviousPrimaryStableMonitorId,
+                SplitPhysicalId = state.PhysicalStableMonitorId, SplitActive = true,
+                DesiredId = string.IsNullOrEmpty(state.AppliedPrimaryStableMonitorId) ? state.PreviousPrimaryStableMonitorId : state.AppliedPrimaryStableMonitorId });
+        var connectedSource = DisplayConfig.EnumerateConnected().Where(m => m.StableMonitorId == state.PhysicalStableMonitorId).ToList();
+        if (connectedSource.Count > 1) throw new ApplyException("Split source identity is ambiguous; recovery evidence retained.");
+        // An absent pre-split primary must not prevent virtual monitor teardown.
+        bool hiddenSourceOffline = !string.IsNullOrEmpty(state.SpecializedStableMonitorId) &&
+            !DisplayConfig.EnumerateConnected().Any(m => m.StableMonitorId == state.SpecializedStableMonitorId);
+        if (!string.IsNullOrEmpty(state.SpecializedStableMonitorId) && !hiddenSourceOffline)
             _ = MonitorIdentityStore.Resolve(state.SpecializedStableMonitorId, requireActive: false);
         if (!string.IsNullOrEmpty(state.SpecializedDevice) && string.IsNullOrEmpty(state.SpecializedStableMonitorId))
             throw new ApplyException("Legacy hidden monitor requires explicit recovery identity confirmation.");
@@ -483,7 +508,8 @@ public static class ApplyService
         // Put the physical monitor back on the desktop BEFORE anything else is torn down —
         // otherwise the primary restore and the virtual-monitor removal both operate on a
         // desktop that is missing a display.
-        ClearSpecializationIfOurs(log, ui, ct);
+        if (!hiddenSourceOffline) ClearSpecializationIfOurs(log, ui, ct);
+        else log.Report("Hidden source is disconnected; its recovery ownership is retained for its return.");
 
         // Hand primary back to a physical monitor BEFORE the virtual ones disappear. If the
         // primary vanishes, Windows picks an arbitrary survivor and re-bases the desktop on
@@ -493,7 +519,6 @@ public static class ApplyService
         log.Report("Sending IOCTL_DESKSPLIT_SET_CONFIG with MonitorCount = 0...");
         try
         {
-            _ = MonitorIdentityStore.Resolve(state.PhysicalStableMonitorId);
             DriverClient.ClearConfig();
         }
         catch (DriverNotFoundException ex)
@@ -514,7 +539,14 @@ public static class ApplyService
         }
 
         // Mark the split as deliberately off, so startup auto-apply does not resurrect it.
-        MarkSplitInactive(deliberate: true);
+        MarkSplitInactive(deliberate);
+        var primary = PrimaryPreferenceStore.Default.Read();
+        if (primary is not null) PrimaryPreferenceStore.Default.Write(primary.CompleteTeardown(deliberate));
+        // Confirm again after virtual devices retire; keep pending state if the original is offline.
+        RestorePrimaryBeforeTeardown(log);
+        var completed = PrimaryPreferenceStore.Default.Read();
+        if (deliberate && completed is not null && DisplayConfig.Enumerate().Count(m => m.IsPrimary && m.StableMonitorId == completed.PreSplitId) == 1)
+            PrimaryPreferenceStore.Default.Write(completed.BeginRevert() with { RevertPending = false });
 
         log.Report("Reverted — virtual monitors removed.");
     }
@@ -816,7 +848,16 @@ public static class ApplyService
     private static (string Device, string FriendlyName) CapturePreviousPrimary(
         IReadOnlyList<MonitorInfo> before, IProgress<string> log)
     {
+        var saved = PrimaryPreferenceStore.Default.Read();
+        if (saved?.SplitActive == true)
+            return (saved.PreSplitId, SettingsStore.Load()?.PreviousPrimaryFriendlyName ?? "saved pre-split monitor");
+        if (saved is not null && !before.Any(m => m.StableMonitorId == saved.DesiredId) && !saved.DesiredIsVirtual)
+            return (saved.DesiredId, "the remembered offline physical primary");
         MonitorInfo? livePrimary = before.FirstOrDefault(m => m.IsPrimary);
+        // Carry the original across a legacy active split even if the user chose another physical primary.
+        var legacy = SettingsStore.Load();
+        if (before.Any(m => m.IsDeskSplitVirtual) && !string.IsNullOrEmpty(legacy?.PreviousPrimaryStableMonitorId))
+            return (legacy.PreviousPrimaryStableMonitorId, legacy.PreviousPrimaryFriendlyName);
 
         if (livePrimary is not null && !livePrimary.IsDeskSplitVirtual)
         {
@@ -858,7 +899,7 @@ public static class ApplyService
     /// hand primary back and forth without duplicating the re-basing logic.
     /// </summary>
     public static bool SwitchPrimaryTo(string targetDevice, string description, IProgress<string> log)
-        => SwitchPrimary(targetDevice, description, log);
+    { lock (DisplayOperationGate) return SwitchPrimary(targetDevice, description, log); }
 
     private static bool SwitchPrimary(string targetDevice, string description, IProgress<string> log)
     {
@@ -868,7 +909,7 @@ public static class ApplyService
             return false;
         }
 
-        targetDevice = MonitorIdentityStore.Resolve(targetDevice).DeviceName;
+        string stableId = targetDevice;
         IReadOnlyList<MonitorInfo> current = DisplayConfig.Enumerate();
         if (current.Count == 0)
         {
@@ -876,8 +917,10 @@ public static class ApplyService
             return false;
         }
 
+        MonitorInfo target = MonitorIdentityResolver.Resolve(stableId, current);
+        targetDevice = target.DeviceName;
         MonitorInfo? livePrimary = current.FirstOrDefault(m => m.IsPrimary);
-        if (livePrimary is not null && SameDevice(livePrimary.DeviceName, targetDevice))
+        if (livePrimary?.StableMonitorId == stableId)
         {
             log.Report($"{description} is already the primary display.");
             return true;
@@ -900,7 +943,9 @@ public static class ApplyService
             log.Report($"Making {description} the primary display — re-basing all " +
                        $"{rebased.Count} monitor(s) by ({-origin.X},{-origin.Y}):");
             DisplayArranger.ApplyLayout(rebased, log.Report);
-            return true;
+            bool confirmed = DisplayConfig.Enumerate().Count(m => m.IsPrimary && m.StableMonitorId == stableId) == 1;
+            if (!confirmed) log.Report("Primary switch not yet confirmed by Windows; preference retained for retry.");
+            return confirmed;
         }
         catch (DisplayArrangeException ex)
         {
@@ -910,20 +955,22 @@ public static class ApplyService
     }
 
     /// <summary>
-    /// Picks the best physical monitor to hold primary once the split is torn down and
-    /// switches to it. Preference order: the display that was primary before Apply, then the
-    /// monitor that was split, then whatever physical monitor is available.
+    /// Restores the original physical primary if available. Offline identity is retained;
+    /// Windows may use a temporary fallback, but it never replaces the saved Revert target.
     /// </summary>
     private static void RestorePrimaryBeforeTeardown(IProgress<string> log)
     {
-        AppSettings? settings = SettingsStore.Load();
-        if (settings is null || !settings.HasConfirmedIdentity)
-            throw new ApplyException("Cannot restore primary: monitor identity requires confirmation.");
-        string id = string.IsNullOrEmpty(settings.PreviousPrimaryStableMonitorId)
-            ? settings.PhysicalStableMonitorId : settings.PreviousPrimaryStableMonitorId;
-        _ = MonitorIdentityStore.Resolve(id);
-        if (!SwitchPrimary(id, "the saved physical monitor", log))
-            throw new ApplyException("Could not restore the identified primary display.");
+        var preferences = PrimaryPreferenceStore.Default.Read();
+        var settings = SettingsStore.Load();
+        string id = preferences?.PreSplitId ?? settings?.PreviousPrimaryStableMonitorId ?? "";
+        if (id.Length == 0) throw new ApplyException("The pre-split primary identity is unknown; no arbitrary replacement selected.");
+        var matches = DisplayConfig.Enumerate().Where(m => m.StableMonitorId == id).ToList();
+        if (matches.Count == 0) { log.Report($"Pre-split primary {id} is offline; restoration will be retried when it returns."); return; }
+        if (matches.Count != 1 || matches[0].IsDeskSplitVirtual) throw new ApplyException("Pre-split physical primary identity is ambiguous.");
+        try {
+            if (!SwitchPrimary(id, "the saved pre-split physical monitor", log))
+                log.Report("Primary restoration remains pending; recovery identity retained.");
+        } catch (InvalidOperationException ex) { log.Report("Primary changed/disconnected during restore; retry remains pending: " + ex.Message); }
     }
 
     private static string RequireIdentity(MonitorInfo monitor)
