@@ -14,6 +14,7 @@ public sealed class SplitSuspensionWatcher : IDisposable
     private readonly IProgress<string> _log;
     private readonly object _stateGate = new();
     private readonly PrimaryPreferenceTracker _tracker = new();
+    private readonly PrimaryPreferenceWriteback _writeback = new();
     private Run? _run;
     private bool _restartRequested;
     private int _displayUnavailable;
@@ -84,7 +85,7 @@ public sealed class SplitSuspensionWatcher : IDisposable
         // Never block a stopping thread behind Apply, and never mutate outside this gate.
         if (!Monitor.TryEnter(ApplyService.DisplayOperationGate)) return;
         try {
-            var state = PrimaryPreferenceStore.Default.Read();
+            var state = _writeback.Flush(PrimaryPreferenceStore.Default.Read(), PrimaryPreferenceStore.Default.Write);
             if (state is null) {
                 var legacy = SettingsStore.Load();
                 if (legacy?.HasConfirmedIdentity != true || string.IsNullOrEmpty(legacy.PreviousPrimaryStableMonitorId) || !HidingStatus.IsSplitActive()) return;
@@ -121,7 +122,7 @@ public sealed class SplitSuspensionWatcher : IDisposable
             var decision = _tracker.Observe(state, observations, now,
                 manualIntent, Interlocked.Exchange(ref _lifecycleEvent, 0) != 0 || Volatile.Read(ref _displayUnavailable) != 0, _suspended);
             if (decision.State != state) {
-                PrimaryPreferenceStore.Default.Write(decision.State);
+                _writeback.Commit(state, decision.State, PrimaryPreferenceStore.Default.Write);
                 _log.Report($"Primary preference: pre-split={decision.State.PreSplitId}, desired={decision.State.DesiredId}, manual={decision.State.ManualOverride}, revertPending={decision.State.RevertPending}.");
             }
             Report(decision.Reason);

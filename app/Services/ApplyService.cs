@@ -489,6 +489,10 @@ public static class ApplyService
             PrimaryPreferenceStore.Default.Write(new PrimaryMonitorState { PreSplitId = state.PreviousPrimaryStableMonitorId,
                 SplitPhysicalId = state.PhysicalStableMonitorId, SplitActive = true,
                 DesiredId = string.IsNullOrEmpty(state.AppliedPrimaryStableMonitorId) ? state.PreviousPrimaryStableMonitorId : state.AppliedPrimaryStableMonitorId });
+        if (deliberate) {
+            var intent = PrimaryPreferenceStore.Default.Read();
+            if (intent is not null) PrimaryPreferenceStore.Default.Write(intent.BeginRevert()); // Durable before teardown can fail.
+        }
         var connectedSource = DisplayConfig.EnumerateConnected().Where(m => m.StableMonitorId == state.PhysicalStableMonitorId).ToList();
         if (connectedSource.Count > 1) throw new ApplyException("Split source identity is ambiguous; recovery evidence retained.");
         // An absent pre-split primary must not prevent virtual monitor teardown.

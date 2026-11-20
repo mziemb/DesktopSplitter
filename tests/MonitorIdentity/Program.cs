@@ -398,6 +398,21 @@ Test("hosted Windows Settings counts as intent but unrelated ApplicationFrameHos
     Check(!PrimaryChangeIntent.IsSettingsInteraction("ApplicationFrameHost", 8000, new[] { "SystemSettings" }));
 });
 
+Test("failed primary write retains the chosen preference until storage recovers", () => {
+    var original = Session(); var chosen = original with { DesiredId = "Q", ManualOverride = true };
+    var writeback = new PrimaryPreferenceWriteback(); bool failed = false;
+    try { writeback.Commit(original, chosen, _ => throw new IOException("mock write fault")); } catch (IOException) { failed = true; }
+    Check(failed);
+    PrimaryMonitorState? stored = null;
+    Check(writeback.Flush(original, state => stored = state) == chosen && stored == chosen);
+});
+Test("a deferred manual write cannot overwrite a later explicit Revert", () => {
+    var original = Session(); var writeback = new PrimaryPreferenceWriteback();
+    try { writeback.Commit(original, original with { DesiredId = "Q" }, _ => throw new IOException()); } catch (IOException) { }
+    var revert = original.BeginRevert(); bool wrote = false;
+    Check(writeback.Flush(revert, _ => wrote = true) == revert && !wrote);
+});
+
 Console.WriteLine($"{passed} tests passed; no Windows display APIs were called.");
 
 sealed class FakeHotkeyBackend : IHotkeyBackend

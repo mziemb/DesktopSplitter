@@ -4,6 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../app/Services/PrimaryPreferenceWriteback.cs" Link="PrimaryPreferenceWriteback.cs"/>
     <Compile Include="../../app/Services/PrimaryChangeIntent.cs" Link="PrimaryChangeIntent.cs"/>
     <Compile Include="../../app/Models/VirtualPlacementPolicy.cs" Link="VirtualPlacementPolicy.cs"/>
     <Compile Include="../../app/Models/PrimaryMonitorState.cs" Link="PrimaryMonitorState.cs"/>

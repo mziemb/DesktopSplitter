@@ -8,7 +8,10 @@ or merge the abandoned primary-monitor-preservation branch.
 `%APPDATA%\DesktopSplitter\primary-preferences.json` stores confirmed logical
 monitor IDs, independently of UI settings. Writes use a temporary file and atomic
 replacement; the first replaced version is retained as `.bak`. Corruption or an
-unknown schema stops automatic changes instead of replacing recovery data.
+unknown schema stops automatic changes instead of replacing recovery data. A failed
+manual-preference write is retried before further automatic switching; it cannot
+make the reconciler restore the stale preference. A later Apply/Revert supersedes
+such a deferred write.
 
 - `PreSplitId`: the primary before the first Apply of this split session. Saved
   before driver/topology changes, and carried through repeated Apply.
@@ -20,7 +23,8 @@ unknown schema stops automatic changes instead of replacing recovery data.
 - `RevertPending`: the original primary could not yet be restored. An absent
   monitor remains a pending ID, never a replacement DISPLAYn or arbitrary monitor.
 
-A deliberate Revert restores PreSplitId before and after virtual device teardown.
+A deliberate Revert records its intent before teardown can fail, then restores
+PreSplitId before and after virtual device teardown.
 If it is absent, virtual monitors can still be removed, and restoration is retried
 when the same identity returns. Owned hidden-display recovery is retained while
 its source is offline and retried after reconnect; failed/unconfirmed recovery is
