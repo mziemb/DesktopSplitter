@@ -112,8 +112,14 @@ public sealed class SplitSuspensionWatcher : IDisposable
             else if (secure != SuspensionRequest.Unknown) _suspended = secure == SuspensionRequest.Suspended;
             var observations = live.Select(m => new PrimaryObservation(m.StableMonitorId, m.IsPrimary,
                 m.IsDeskSplitVirtual, m.CurrentWidth, m.CurrentHeight)).ToList();
+            bool manualIntent = Interlocked.Exchange(ref _displayEvent, 0) != 0;
+            // WM_DISPLAYCHANGE is not guaranteed for a primary-only change with unchanged
+            // resolution. Polling still needs a recent foreground Settings interaction.
+            string desired = state.RevertPending ? state.PreSplitId : state.DesiredId;
+            if (!manualIntent && !_suspended && !state.RevertPending && observations.Any(m => m.IsPrimary && m.Id != desired))
+                manualIntent = PrimaryChangeIntent.ObserveSettingsInteraction();
             var decision = _tracker.Observe(state, observations, now,
-                Interlocked.Exchange(ref _displayEvent, 0) != 0, Interlocked.Exchange(ref _lifecycleEvent, 0) != 0 || Volatile.Read(ref _displayUnavailable) != 0, _suspended);
+                manualIntent, Interlocked.Exchange(ref _lifecycleEvent, 0) != 0 || Volatile.Read(ref _displayUnavailable) != 0, _suspended);
             if (decision.State != state) {
                 PrimaryPreferenceStore.Default.Write(decision.State);
                 _log.Report($"Primary preference: pre-split={decision.State.PreSplitId}, desired={decision.State.DesiredId}, manual={decision.State.ManualOverride}, revertPending={decision.State.RevertPending}.");

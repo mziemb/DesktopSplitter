@@ -46,6 +46,8 @@ Physical relative placement is preserved; primary rebasing is still one batch.
 
 Inputs include WM_DISPLAYCHANGE, WM_DEVICECHANGE, console display power state,
 Windows suspend/resume, session transitions and compositor secure-desktop events.
+Primary-only changes are also polled: they need not produce a resolution-change
+WM_DISPLAYCHANGE notification. The same foreground Settings intent filter applies.
 Unavailable/ambiguous identities and incomplete enumeration defer changes without
 rewriting intent. Monitor sets and dimensions must settle for three seconds after
 lifecycle changes. Own writes are suppressed as learning signals.
