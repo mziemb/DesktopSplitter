@@ -41,6 +41,8 @@ public partial class App : Application
         SystemEvents.SessionEnding += (_, _) => Teardown();
 
         _viewModel = new MainViewModel();
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        SystemEvents.SessionSwitch += OnSessionSwitch;
 
         _tray = new TrayIconService();
         _tray.OpenRequested += (_, _) => ShowMainWindow();
@@ -74,6 +76,11 @@ public partial class App : Application
         _ = _viewModel.AutoApplyOnStartupAsync();
     }
 
+    private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+        => _viewModel?.NotifyDisplayLifecycleChange(e.Mode == PowerModes.Suspend ? true : e.Mode == PowerModes.Resume ? false : null);
+    private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+        => _viewModel?.NotifyDisplayLifecycleChange();
+
     private void ShowMainWindow()
     {
         if (_window is null) return;
@@ -106,6 +113,8 @@ public partial class App : Application
         IsExiting = true;
         Teardown();
 
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        SystemEvents.SessionSwitch -= OnSessionSwitch;
         _revertHotkey?.Dispose();
         _revertHotkey = null;
         _tray?.Dispose();

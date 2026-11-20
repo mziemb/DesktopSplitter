@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -14,6 +15,15 @@ namespace DesktopSplitter;
 public partial class MainWindow : Window, IHidingUi
 {
     private const int WM_DISPLAYCHANGE = 0x007E;
+    private const int WM_DEVICECHANGE = 0x0219, WM_POWERBROADCAST = 0x0218;
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr RegisterPowerSettingNotification(IntPtr recipient, ref Guid setting, uint flags);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterPowerSettingNotification(IntPtr handle);
+    [StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct PowerSetting { public Guid Setting; public uint Length; }
+    private IntPtr _powerNotification;
+
 
     private InstallerShutdownHook? _installerExitHook;
     private readonly MainViewModel _viewModel;
@@ -192,6 +202,8 @@ public partial class MainWindow : Window, IHidingUi
         // presentation source (startup-to-tray). Attach by HWND, not by Visual.
         IntPtr handle = new WindowInteropHelper(this).Handle;
         HwndSource.FromHwnd(handle)?.AddHook(WndProc);
+        var displayPower = new Guid("6FE69556-704A-47A0-8F24-C28D936FDA47"); // GUID_CONSOLE_DISPLAY_STATE
+        _powerNotification = RegisterPowerSettingNotification(handle, ref displayPower, 0);
         _installerExitHook = new InstallerShutdownHook(handle, () => _viewModel.IsBusy,
             () => Dispatcher.BeginInvoke(new Action(() => (Application.Current as App)?.ExitApplication())));
     }
@@ -199,13 +211,22 @@ public partial class MainWindow : Window, IHidingUi
     protected override void OnClosed(EventArgs e)
     {
         _installerExitHook?.Dispose();
+        if (_powerNotification != IntPtr.Zero) UnregisterPowerSettingNotification(_powerNotification);
         base.OnClosed(e);
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (msg == WM_DEVICECHANGE || msg == WM_POWERBROADCAST)
+            _viewModel.NotifyDisplayLifecycleChange();
+        if (msg == WM_POWERBROADCAST && wParam.ToInt64() == 0x8013 && lParam != IntPtr.Zero) {
+            var setting = Marshal.PtrToStructure<PowerSetting>(lParam);
+            if (setting.Setting == new Guid("6FE69556-704A-47A0-8F24-C28D936FDA47") && setting.Length == 4)
+                _viewModel.NotifyDisplayLifecycleChange(Marshal.ReadInt32(lParam, 20) == 0);
+        }
         if (msg == WM_DISPLAYCHANGE)
         {
+            _viewModel.NotifyPrimaryDisplayChange(PrimaryChangeIntent.ObserveSettingsInteraction());
             _displayChangeDebounce.Stop();
             _displayChangeDebounce.Start();
         }

@@ -4,6 +4,11 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../app/Services/PrimaryPreferenceWriteback.cs" Link="PrimaryPreferenceWriteback.cs"/>
+    <Compile Include="../../app/Services/PrimaryChangeIntent.cs" Link="PrimaryChangeIntent.cs"/>
+    <Compile Include="../../app/Models/VirtualPlacementPolicy.cs" Link="VirtualPlacementPolicy.cs"/>
+    <Compile Include="../../app/Models/PrimaryMonitorState.cs" Link="PrimaryMonitorState.cs"/>
+    <Compile Include="../../app/Services/PrimaryPreferenceStore.cs" Link="PrimaryPreferenceStore.cs"/>
     <Compile Include="../../app/Models/RevertHotkey.cs" Link="RevertHotkey.cs"/>
     <Compile Include="../../app/Services/HotkeyRegistration.cs" Link="HotkeyRegistration.cs"/>
     <Compile Include="../../app/Services/RevertRequestQueue.cs" Link="RevertRequestQueue.cs"/>

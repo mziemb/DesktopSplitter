@@ -54,6 +54,7 @@ public sealed class MainViewModel : ObservableObject
         ResetSegmentsCommand = new RelayCommand(() => RebuildSegments(resetSizes: true),
                                                 () => !IsBusy && SelectedLayout is not null);
         ApplyCommand = new RelayCommand(async () => await ApplyAsync().ConfigureAwait(false), () => CanApply);
+        RememberPrimaryCommand = new RelayCommand(async () => await RememberCurrentPrimaryAsync(), () => !IsBusy);
         RevertCommand = new RelayCommand(async () => await RevertAsync().ConfigureAwait(false), () => !IsBusy);
         MinimizeToTrayCommand = new RelayCommand(() => MinimizeToTrayRequested?.Invoke(this, EventArgs.Empty));
 
@@ -110,21 +111,12 @@ public sealed class MainViewModel : ObservableObject
     // ------------------------------------------------------------------ suspend / resume
 
     /// <summary>
-    /// Starts handing primary back to the physical monitor whenever the compositor reports a
-    /// secure desktop, lock screen, or the manual Ctrl+Alt+Shift+S toggle.
+    /// Watches durable primary intent through topology/power changes and secure-desktop transitions.
     /// </summary>
     private void StartSuspensionWatcher()
     {
-        AppSettings? settings = SettingsStore.Load();
-        if (settings is null) return;
-
-        string activePrimary = settings.AppliedPrimaryStableMonitorId;
-        string physicalPrimary = string.IsNullOrEmpty(settings.PreviousPrimaryStableMonitorId)
-            ? settings.PhysicalStableMonitorId
-            : settings.PreviousPrimaryStableMonitorId;
-
         _suspensionWatcher ??= new SplitSuspensionWatcher(_progress);
-        _suspensionWatcher.Start(activePrimary, physicalPrimary);
+        _suspensionWatcher.Start();
     }
 
     /// <summary>
@@ -277,7 +269,7 @@ public sealed class MainViewModel : ObservableObject
 
             var log = new Progress<string>(_ => { });
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            ApplyService.Revert(log, cts.Token);
+            ApplyService.Revert(log, cts.Token, deliberate: false);
 
             // Exiting is not a deliberate revert: the configuration should come back next launch.
             AppSettings? settings = SettingsStore.Load();
@@ -414,6 +406,7 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand ResetSegmentsCommand { get; }
     public RelayCommand ApplyCommand { get; }
     public RelayCommand RevertCommand { get; }
+    public RelayCommand RememberPrimaryCommand { get; }
     public RelayCommand MinimizeToTrayCommand { get; }
 
     public event EventHandler? MinimizeToTrayRequested;
@@ -438,11 +431,33 @@ public sealed class MainViewModel : ObservableObject
         {
             AppendStatus("Display-hiding recovery check failed: " + ex.Message);
         }
+        finally { StartSuspensionWatcher(); }
     }
 
     // ------------------------------------------------------------------ monitor list
 
     /// <summary>Called from the WM_DISPLAYCHANGE hook; keeps the user's edits.</summary>
+    public void NotifyPrimaryDisplayChange(bool userIntent) => _suspensionWatcher?.NotifyDisplayChanged(userIntent);
+    public void NotifyDisplayLifecycleChange(bool? unavailable = null) => _suspensionWatcher?.NotifyLifecycleChanged(unavailable);
+
+    private async Task RememberCurrentPrimaryAsync()
+    {
+        try {
+            await Task.Run(() => {
+                lock (ApplyService.DisplayOperationGate) {
+                    var state = PrimaryPreferenceStore.Default.Read();
+                    if (state is null) throw new InvalidOperationException("Apply a split before recording primary preferences.");
+                    if (state.RevertPending) throw new InvalidOperationException("The pre-split primary is still awaiting restoration; reconnect it first.");
+                    var primary = DisplayConfig.Enumerate().Single(m => m.IsPrimary);
+                    _ = MonitorIdentityStore.Resolve(primary.StableMonitorId);
+                    PrimaryPreferenceStore.Default.Write(state with { DesiredId = primary.StableMonitorId,
+                        DesiredIsVirtual = primary.IsDeskSplitVirtual, ManualOverride = true });
+                    _progress.Report($"Remembered {primary.DisplayLabel} as the split primary. Revert still restores {state.PreSplitId}.");
+                }
+            });
+        } catch (Exception ex) { AppendStatus("Cannot remember primary: " + ex.Message); }
+    }
+
     public void OnDisplayChanged()
     {
         LoadMonitors(announce: false);
@@ -866,6 +881,7 @@ public sealed class MainViewModel : ObservableObject
             _applyCancellation.Dispose();
             _applyCancellation = null;
             IsBusy = false;
+            StartSuspensionWatcher();
             if (_revertRequests.TakePending())
             {
                 await RevertAsync().ConfigureAwait(true);
@@ -913,6 +929,7 @@ public sealed class MainViewModel : ObservableObject
         {
             _revertRequests.CompleteRevert();
             IsBusy = false;
+            StartSuspensionWatcher();
             LoadMonitors(announce: false);
             RefreshDriverStatus();
             RefreshCompositorStatus();
@@ -998,6 +1015,7 @@ public sealed class MainViewModel : ObservableObject
         SaveRevertHotkeyCommand?.RaiseCanExecuteChanged();
         ApplyCommand.RaiseCanExecuteChanged();
         RevertCommand.RaiseCanExecuteChanged();
+        RememberPrimaryCommand.RaiseCanExecuteChanged();
         RefreshMonitorsCommand.RaiseCanExecuteChanged();
         ResetSegmentsCommand.RaiseCanExecuteChanged();
     }
