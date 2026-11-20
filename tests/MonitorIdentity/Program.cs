@@ -392,6 +392,12 @@ Test("collision displacement also connects the group to a vertically offset desk
     Check(!VirtualPlacementPolicy.Overlaps(new PixelRect(offset.X, offset.Y, 1080, 640), physical[1]));
 });
 
+Test("hosted Windows Settings counts as intent but unrelated ApplicationFrameHost windows do not", () => {
+    Check(PrimaryChangeIntent.IsSettingsInteraction("ApplicationFrameHost", 100, new[] { "SystemSettings" }));
+    Check(!PrimaryChangeIntent.IsSettingsInteraction("ApplicationFrameHost", 100, new[] { "Calculator" }));
+    Check(!PrimaryChangeIntent.IsSettingsInteraction("ApplicationFrameHost", 8000, new[] { "SystemSettings" }));
+});
+
 Console.WriteLine($"{passed} tests passed; no Windows display APIs were called.");
 
 sealed class FakeHotkeyBackend : IHotkeyBackend

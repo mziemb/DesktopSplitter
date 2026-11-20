@@ -52,7 +52,8 @@ lifecycle changes. Own writes are suppressed as learning signals.
 
 Windows does not report whether a primary change was a user's action or an OS
 fallback. To avoid learning a fallback, automatic manual-choice adoption requires
-a recent interaction with foreground Windows Settings plus a changed primary on
+a recent interaction with foreground Windows Settings (including its hosted
+ApplicationFrameHost window) plus a changed primary on
 a settled topology. A Settings event during sleep/reconnect settling is ambiguous
 and is not automatically learned. For another display utility, rapid changes
 during wake, or an unobserved event, use **Remember current Windows primary**.
