@@ -3,10 +3,35 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="RDP connections" Width="700" Height="490" MinWidth="620" MinHeight="440"
         WindowStartupLocation="CenterScreen" Background="{StaticResource WindowBackground}">
+    <Window.Resources>
+        <Style TargetType="ListBoxItem">
+            <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="ItemBorder" Background="Transparent" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="ItemBorder" Property="Background" Value="{StaticResource AccentSoftBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ItemBorder" Property="Background" Value="{StaticResource PanelBorder}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
     <Grid Margin="18">
         <Grid.ColumnDefinitions><ColumnDefinition Width="210"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
         <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-        <ListBox x:Name="Connections" DisplayMemberPath="Name" SelectionChanged="SelectionChanged"/>
+        <ListBox x:Name="Connections" DisplayMemberPath="Name" SelectionChanged="SelectionChanged"
+                 Background="{StaticResource PanelBackground}" Foreground="{StaticResource ForegroundBrush}"
+                 BorderBrush="{StaticResource PanelBorder}"/>
         <StackPanel Grid.Column="2">
             <TextBlock Text="Saved connection" FontSize="18" Margin="0,0,0,14"/>
             <TextBlock Text="Name"/><TextBox x:Name="ConnectionName" Margin="0,4,0,10" MaxLength="120"/>

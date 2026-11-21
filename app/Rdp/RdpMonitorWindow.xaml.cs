@@ -48,7 +48,8 @@ public partial class RdpMonitorWindow : Window
             foreach (var monitor in snapshot.Monitors)
             {
                 var row = new DockPanel { Margin = new Thickness(0, 3, 0, 3) };
-                var check = new CheckBox { Content = $"{monitor.Label}  [RDP {monitor.RdpId}]", IsEnabled = monitor.StableId.Length > 0,
+                var check = new CheckBox { Content = new TextBlock { Text = $"{monitor.Label}  [RDP {monitor.RdpId}]",
+                    TextWrapping = TextWrapping.Wrap, MaxWidth = 660 }, IsEnabled = monitor.StableId.Length > 0,
                     IsChecked = saved?.SelectedIds.Contains(monitor.StableId) == true, VerticalAlignment = VerticalAlignment.Center };
                 if (monitor.StableId.Length == 0)
                 {
