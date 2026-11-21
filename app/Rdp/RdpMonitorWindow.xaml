@@ -1,0 +1,33 @@
+<Window x:Class="DesktopSplitter.Rdp.RdpMonitorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Choose RDP monitors" Width="950" Height="700" MinWidth="760" MinHeight="600"
+        WindowStartupLocation="CenterScreen" Background="{StaticResource WindowBackground}">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="270"/>
+            <RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock x:Name="Heading" FontSize="19" FontWeight="SemiBold"/>
+        <TextBlock Grid.Row="1" Text="Current Windows layout. Click displays to select them, then choose the remote primary. The split physical source is disabled; select its virtual displays."
+                   TextWrapping="Wrap" Margin="0,8,0,12"/>
+        <Border Grid.Row="2" BorderThickness="1" BorderBrush="{StaticResource MutedBrush}" Padding="6">
+            <Viewbox Stretch="Uniform"><Canvas x:Name="Map" Width="900" Height="260"/></Viewbox>
+        </Border>
+        <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto" Margin="0,12,0,8">
+            <StackPanel x:Name="MonitorRows"/>
+        </ScrollViewer>
+        <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,4,0,10">
+            <TextBlock Text="Remote primary:" VerticalAlignment="Center" Margin="0,0,12,0"/>
+            <ComboBox x:Name="Primary" Width="590" DisplayMemberPath="Label" SelectionChanged="Primary_Changed"/>
+        </StackPanel>
+        <TextBlock Grid.Row="5" x:Name="Status" TextWrapping="Wrap" Margin="0,0,0,12" Foreground="{StaticResource MutedBrush}"/>
+        <DockPanel Grid.Row="6">
+            <Button x:Name="RefreshButton" Content="Refresh displays" Click="Refresh_Click" Padding="14,6" DockPanel.Dock="Left"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="ConnectButton" Content="Connect" Click="Connect_Click" Padding="24,6" Margin="12,0,8,0" IsEnabled="False" IsDefault="True"/>
+                <Button x:Name="CancelButton" Content="Cancel" Click="Cancel_Click" Padding="18,6" IsCancel="True"/>
+            </StackPanel>
+        </DockPanel>
+    </Grid>
+</Window>

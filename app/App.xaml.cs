@@ -1,3 +1,4 @@
+using DesktopSplitter.Rdp;
 using System.Threading;
 using System.Windows;
 using DesktopSplitter.Services;
@@ -10,6 +11,7 @@ public partial class App : Application
 {
     private TrayIconService? _tray;
     private GlobalRevertHotkey? _revertHotkey;
+    private RdpTrayController? _rdp;
     private MainViewModel? _viewModel;
     private MainWindow? _window;
     private int _teardownDone;
@@ -55,6 +57,7 @@ public partial class App : Application
         _tray.ExitRequested += (_, _) => ExitApplication();
 
         _window = new MainWindow(_viewModel, _tray);
+        _rdp = new RdpTrayController(_tray, () => IsExiting || _viewModel.IsBusy);
         // Keep an IPC endpoint available even when auto-starting directly to the tray.
         new System.Windows.Interop.WindowInteropHelper(_window).EnsureHandle();
         try
@@ -115,6 +118,8 @@ public partial class App : Application
 
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
+        _rdp?.Dispose();
+        _rdp = null;
         _revertHotkey?.Dispose();
         _revertHotkey = null;
         _tray?.Dispose();
