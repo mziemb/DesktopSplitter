@@ -24,6 +24,8 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Test managed identity, resolution and migration (no display APIs)
         run: dotnet run --project tests/MonitorIdentity/MonitorIdentity.Tests.csproj -c Release
+      - name: Test RDP profiles, monitor selection and persistence (no client launch)
+        run: dotnet run --project tests/Rdp/Rdp.Tests.csproj -c Release
       - name: Test native identity matching (no display APIs)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror tests/MonitorIdentity/IdentityProbe.cpp -o /tmp/identity-probe

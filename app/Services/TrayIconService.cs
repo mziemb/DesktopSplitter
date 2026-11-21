@@ -1,3 +1,4 @@
+using DesktopSplitter.Rdp;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
@@ -15,6 +16,7 @@ public sealed class TrayIconService : IDisposable
     private readonly ContextMenuStrip _menu;
     private readonly ToolStripMenuItem _applyLastItem;
     private readonly ToolStripMenuItem _revertItem;
+    private readonly ToolStripMenuItem _rdpItem;
     private Icon? _generatedIcon;
     private IntPtr _generatedIconHandle;
     private bool _disposed;
@@ -39,7 +41,11 @@ public sealed class TrayIconService : IDisposable
         _menu.Items.Add(_applyLastItem);
         _menu.Items.Add(_revertItem);
         _menu.Items.Add(new ToolStripSeparator());
+        _rdpItem = new ToolStripMenuItem("RDP connections");
+        _menu.Items.Add(_rdpItem);
+        _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(exitItem);
+        SetRdpConnections(Array.Empty<RdpConnection>());
 
         _notifyIcon = new NotifyIcon
         {
@@ -49,6 +55,28 @@ public sealed class TrayIconService : IDisposable
             ContextMenuStrip = _menu,
         };
         _notifyIcon.DoubleClick += (_, _) => OpenRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    public event Action<string>? RdpConnectionRequested;
+    public event EventHandler? ManageRdpRequested;
+
+    public void SetRdpConnections(IEnumerable<RdpConnection> connections)
+    {
+        foreach (var item in _rdpItem.DropDownItems.Cast<ToolStripItem>().ToArray()) item.Dispose();
+        _rdpItem.DropDownItems.Clear();
+        foreach (var connection in connections.OrderBy(c => c.Name))
+        {
+            string id = connection.Id;
+            var item = new ToolStripMenuItem(connection.Name.Replace("&", "&&")) { ToolTipText = connection.Address };
+            item.Click += (_, _) => RdpConnectionRequested?.Invoke(id);
+            _rdpItem.DropDownItems.Add(item);
+        }
+        if (_rdpItem.DropDownItems.Count == 0)
+            _rdpItem.DropDownItems.Add(new ToolStripMenuItem("No saved connections") { Enabled = false });
+        _rdpItem.DropDownItems.Add(new ToolStripSeparator());
+        var manage = new ToolStripMenuItem("Manage connections…");
+        manage.Click += (_, _) => ManageRdpRequested?.Invoke(this, EventArgs.Empty);
+        _rdpItem.DropDownItems.Add(manage);
     }
 
     public event EventHandler? OpenRequested;
