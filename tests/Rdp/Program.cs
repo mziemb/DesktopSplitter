@@ -34,6 +34,19 @@ Test("remote primary is first in selectedmonitors, without assuming GDI indexes"
     Check(file.Contains("selectedmonitors:s:3,7\r\n")); Check(file.Contains("use multimon:i:1\r\n")); Check(!file.Contains("password"));
 });
 Test("single chosen monitor uses exactly its RDP ID", () => Check(RdpLayoutPolicy.BuildFile(C(), monitors, new[] { "MON-002" }, "MON-002").Contains("selectedmonitors:s:3\r\n")));
+Test("split physical source remains visible but is never selectable or a remote primary", () => {
+    var blocked = monitors.Select(m => m.StableId == "MON-001" ? m with { BlockedReason = "Split source", WindowsNumber = 3 } : m).ToArray();
+    Check(blocked.Length == 3 && !blocked[0].CanSelect && blocked[0].WindowsNumber == 3);
+    Fails(() => RdpLayoutPolicy.Select(blocked, new[] { "MON-001" }, "MON-001"));
+    Fails(() => RdpLayoutPolicy.BuildFile(C(), blocked, new[] { "MON-001", "MON-002" }, "MON-002"));
+    Check(RdpLayoutPolicy.Select(blocked, new[] { "MON-002" }, "MON-002").Single().StableId == "MON-002");
+});
+Test("saved selection cannot restore a split physical source after eligibility changes", () => {
+    var c = C(); RdpLayoutPolicy.Remember(c, monitors, new[] { "MON-001" }, "MON-001");
+    var blocked = monitors.Select(m => m.StableId == "MON-001" ? m with { BlockedReason = "Split source" } : m).ToArray();
+    Fails(() => RdpLayoutPolicy.Recall(c, blocked)); Check(c.Layouts.Count == 1);
+    Check(RdpLayoutPolicy.SnapshotKey(monitors) != RdpLayoutPolicy.SnapshotKey(blocked));
+});
 Test("empty, duplicate, missing and non-selected primary selections are rejected", () => {
     Fails(() => RdpLayoutPolicy.Select(monitors, Array.Empty<string>(), ""));
     Fails(() => RdpLayoutPolicy.Select(monitors, new[] { "MON-001", "MON-001" }, "MON-001"));

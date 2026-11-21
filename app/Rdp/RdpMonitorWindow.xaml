@@ -5,14 +5,14 @@
         WindowStartupLocation="CenterScreen" Background="{StaticResource WindowBackground}">
     <Grid Margin="18">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="190"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="270"/>
             <RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <TextBlock x:Name="Heading" FontSize="19" FontWeight="SemiBold"/>
-        <TextBlock Grid.Row="1" Text="Select the displays to use, then choose the primary display for the remote session. Your local primary stays unchanged."
+        <TextBlock Grid.Row="1" Text="Current Windows layout. Click displays to select them, then choose the remote primary. The split physical source is disabled; select its virtual displays."
                    TextWrapping="Wrap" Margin="0,8,0,12"/>
         <Border Grid.Row="2" BorderThickness="1" BorderBrush="{StaticResource MutedBrush}" Padding="6">
-            <Viewbox Stretch="Uniform"><Canvas x:Name="Map" Width="800" Height="170"/></Viewbox>
+            <Viewbox Stretch="Uniform"><Canvas x:Name="Map" Width="900" Height="260"/></Viewbox>
         </Border>
         <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto" Margin="0,12,0,8">
             <StackPanel x:Name="MonitorRows"/>

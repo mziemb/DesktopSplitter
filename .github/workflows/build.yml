@@ -107,6 +107,11 @@ jobs:
         run: |
           dotnet run --project tests/InstallerIpc/InstallerIpc.Tests.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "WPF IPC tests failed: $LASTEXITCODE" }
+      - name: Test modern RDP probe window extraction (controlled WPF fixtures only)
+        shell: pwsh
+        run: |
+          dotnet run --project tests/RdpProbe/RdpProbe.Tests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "RDP window probe tests failed: $LASTEXITCODE" }
   build:
     runs-on: windows-2022
     timeout-minutes: 90

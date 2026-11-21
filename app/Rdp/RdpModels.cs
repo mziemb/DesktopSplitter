@@ -46,6 +46,9 @@ public sealed class RdpCatalog
 public sealed record RdpMonitor(string StableId, string Label, string GdiName, int RdpId,
     int X, int Y, int Width, int Height, bool LocalPrimary)
 {
+    public int WindowsNumber { get; init; }
+    public string BlockedReason { get; init; } = string.Empty;
+    public bool CanSelect => StableId.Length > 0 && BlockedReason.Length == 0;
     public long Right => (long)X + Width;
     public long Bottom => (long)Y + Height;
     public override string ToString() => Label;
@@ -113,6 +116,7 @@ public static class RdpLayoutPolicy
             throw new InvalidOperationException("Select at least one monitor and a primary from the selected monitors.");
         var selected = ids.Select(id => monitors.SingleOrDefault(m => m.StableId == id)
             ?? throw new InvalidOperationException("A selected monitor is no longer available.")).ToList();
+        if (selected.Any(m => !m.CanSelect)) throw new InvalidOperationException("The split physical display cannot be used for RDP. Select its virtual monitors instead.");
         for (int i = 0; i < selected.Count; i++)
             for (int j = i + 1; j < selected.Count; j++)
                 if (selected[i].X < selected[j].Right && selected[j].X < selected[i].Right &&
@@ -158,5 +162,5 @@ public static class RdpLayoutPolicy
 
     // Includes transient addresses and geometry, so a topology change invalidates an open picker.
     public static string SnapshotKey(IReadOnlyList<RdpMonitor> monitors) => string.Join("|", monitors
-        .OrderBy(m => m.StableId, StringComparer.Ordinal).Select(m => $"{m.StableId}:{m.GdiName}:{m.RdpId}:{m.X}:{m.Y}:{m.Width}:{m.Height}"));
+        .OrderBy(m => m.StableId, StringComparer.Ordinal).Select(m => $"{m.StableId}:{m.GdiName}:{m.RdpId}:{m.X}:{m.Y}:{m.Width}:{m.Height}:{m.BlockedReason}"));
 }

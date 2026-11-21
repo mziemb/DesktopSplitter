@@ -30,7 +30,9 @@ Only active Windows desktop displays are eligible, including DesktopSplitter's
 virtual monitors. Specialized physical targets removed from the desktop are not
 listed. In windowed split mode the covered physical source remains a Windows
 display: choose its virtual segments for visible remote desktops rather than the
-covered physical source.
+covered physical source. The source remains visible in the map, with a disabled
+checkbox and dimmed tile; it cannot be selected or made remote primary. The block
+is keyed by the split source stable ID, never a fixed Windows display number.
 
 Every active display needs a confirmed stable identity to key the monitor set.
 Unconfirmed displays offer **Confirm identity…** to create a binding after user
@@ -40,10 +42,18 @@ logical ID instead. Conflicting identities never silently select another device.
 The saved layout uses stable IDs, never persistent DISPLAYn names or RDP numbers.
 At each refresh and again immediately before launch, a short-lived invocation of
 `%SystemRoot%\System32\mstsc.exe /l` obtains the client's actual current IDs.
-Its owned monitor-list dialog is read with bounded Win32 text messages, without
-clipboard access, simulated keystrokes or inspection of other RDP processes.
-The application hides/closes only that invocation's dialog. A brief dialog flash
-may occur on some Windows versions.
+The Windows map is loaded and rendered first, independently of client probing.
+A probe failure keeps the map and display list visible, explains the error and
+disables Connect rather than showing an empty desktop. Tiles preserve current
+coordinates and proportions and show current DISPLAY address numbers.
+
+The owned monitor-list windows are read with bounded Win32 text messages and
+Windows UI Automation Name/TextPattern fallback. All window classes are eligible;
+there is no #32770-only assumption. The probe starts normally so modern controls
+can initialize their accessibility providers. Clipboard access, simulated
+keystrokes and inspection of other RDP processes are not used. Only windows owned
+by the exact probe PID receive close messages. The monitor-list dialog may be
+briefly visible.
 
 Numeric monitor records are matched one-to-one to the current DisplayConfig
 rectangles, including negative coordinates and portrait displays. Windows state
@@ -111,8 +121,13 @@ startup failure cannot record a successful launch. Post-launch save failures are
 reported without starting a duplicate session.
 
 CI runs this suite without starting mstsc, connecting to a host, reading
-credentials or changing displays. The full Windows build compiles the WPF
-windows and tray integration. Existing monitor identity and installer suites
+credentials or changing displays. Windows CI also exercises the actual reader against a controlled non-#32770
+WPF child process, verifies owned-window cleanup and survival of an unrelated
+same-executable window, then opens the real picker with an injected failing
+probe. It verifies that Windows geometry remains visible, negative-coordinate
+portrait placement is preserved and the split source cannot be selected. No
+actual mstsc or connection is used by these fixtures. The full Windows build
+compiles the WPF windows and tray integration. Existing monitor identity and installer suites
 remain enabled.
 
 ## Windows 11 acceptance checklist (manual)

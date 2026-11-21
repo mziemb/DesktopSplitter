@@ -9,14 +9,14 @@ public partial class RdpMonitorWindow : Window
 {
     private readonly RdpConnection _connection;
     private readonly RdpConnectionStore _store;
-    private readonly RdpDesktopService _desktop;
+    private readonly IRdpDesktopService _desktop;
     private readonly Func<bool> _systemBusy;
     private readonly List<(RdpMonitor Monitor, CheckBox Check)> _rows = new();
     private RdpDesktopSnapshot? _snapshot;
     private bool _loading, _connecting, _closed, _requiresRefresh;
     private string _hint = string.Empty;
 
-    public RdpMonitorWindow(RdpConnection connection, RdpConnectionStore store, RdpDesktopService desktop, Func<bool> systemBusy)
+    public RdpMonitorWindow(RdpConnection connection, RdpConnectionStore store, IRdpDesktopService desktop, Func<bool> systemBusy)
     {
         InitializeComponent();
         _connection = connection; _store = store; _desktop = desktop; _systemBusy = systemBusy;
@@ -26,60 +26,84 @@ public partial class RdpMonitorWindow : Window
         Closing += (_, e) => { if (_connecting) e.Cancel = true; };
     }
 
+    private string _probeError = string.Empty;
     private async Task RefreshAsync()
     {
         if (_loading || _connecting || _closed) return;
-        _loading = true; _requiresRefresh = false; ConnectButton.IsEnabled = false; RefreshButton.IsEnabled = false;
-        MonitorRows.Children.Clear(); Map.Children.Clear(); _rows.Clear(); Primary.ItemsSource = null; _snapshot = null;
-        Status.Text = "Reading current Windows and RDP monitors…";
+        _loading = true; _requiresRefresh = false; _probeError = string.Empty;
+        ConnectButton.IsEnabled = false; RefreshButton.IsEnabled = false;
+        MonitorRows.IsEnabled = false; Primary.IsEnabled = false;
+        Status.Text = "Reading the current Windows display layout…";
         try
         {
             if (_systemBusy()) throw new InvalidOperationException("Wait for Apply/Revert to finish, then refresh.");
-            var snapshot = await _desktop.ReadAsync();
+            _snapshot = await _desktop.ReadWindowsAsync();
             if (_closed) return;
-            _snapshot = snapshot;
-            RdpRememberedLayout? saved = null;
+            RenderSnapshot(); // Windows geometry is visible even if mstsc probing fails.
+            Status.Text = "Windows layout loaded. Reading RDP monitor IDs…";
             try
             {
-                saved = RdpLayoutPolicy.Recall(_connection, snapshot.Monitors);
-                _hint = saved is null ? "No saved layout for this monitor set. Choose monitors to connect." : "Suggested: your last launched layout for this monitor set.";
+                var resolved = await _desktop.ResolveAsync(_snapshot);
+                if (_closed) return;
+                _snapshot = resolved;
+                RenderSnapshot();
             }
-            catch (InvalidOperationException ex) { _hint = ex.Message + " Choose a new layout; the previous one has been retained."; }
-            foreach (var monitor in snapshot.Monitors)
-            {
-                var row = new DockPanel { Margin = new Thickness(0, 3, 0, 3) };
-                var check = new CheckBox { Content = new TextBlock { Text = $"{monitor.Label}  [RDP {monitor.RdpId}]",
-                    TextWrapping = TextWrapping.Wrap, MaxWidth = 660 }, IsEnabled = monitor.StableId.Length > 0,
-                    IsChecked = saved?.SelectedIds.Contains(monitor.StableId) == true, VerticalAlignment = VerticalAlignment.Center };
-                if (monitor.StableId.Length == 0)
-                {
-                    var confirm = new Button { Content = "Confirm identity…", Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(8, 0, 0, 0) };
-                    DockPanel.SetDock(confirm, Dock.Right); row.Children.Add(confirm);
-                    confirm.Click += async (_, _) =>
-                    {
-                        if (MessageBox.Show(this, "Confirm a new stable identity for this monitor?\n\n" + monitor.Label +
-                            "\n\nTo reconnect it to an existing ID instead, use Identity details in the main window.", "Confirm monitor identity",
-                            MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-                        try
-                        {
-                            if (_systemBusy()) throw new InvalidOperationException("Wait for Apply/Revert to finish.");
-                            confirm.IsEnabled = false;
-                            MonitorRows.IsEnabled = false; RefreshButton.IsEnabled = false;
-                            await Task.Run(() => MonitorIdentityStore.Confirm(snapshot.Sources.Single(m => m.DeviceName == monitor.GdiName), null));
-                            await RefreshAsync();
-                        }
-                        catch (Exception ex) { Status.Text = ex.Message; confirm.IsEnabled = true; }
-                        finally { MonitorRows.IsEnabled = true; RefreshButton.IsEnabled = true; }
-                    };
-                }
-                row.Children.Add(check); MonitorRows.Children.Add(row); _rows.Add((monitor, check));
-                check.Checked += (_, _) => SelectionChanged(); check.Unchecked += (_, _) => SelectionChanged();
-            }
-            SelectionChanged();
-            if (saved is not null) Primary.SelectedItem = snapshot.Monitors.Single(m => m.StableId == saved.PrimaryId);
+            catch (Exception ex) { _probeError = ex.Message; }
         }
-        catch (Exception ex) { _hint = Status.Text = ex.Message; }
-        finally { _loading = false; RefreshButton.IsEnabled = true; ValidateSelection(); }
+        catch (Exception ex) { _probeError = ex.Message; }
+        finally
+        {
+            _loading = false; RefreshButton.IsEnabled = true;
+            MonitorRows.IsEnabled = true; Primary.IsEnabled = true;
+            ValidateSelection();
+        }
+    }
+
+    private void RenderSnapshot()
+    {
+        MonitorRows.Children.Clear(); Map.Children.Clear(); _rows.Clear(); Primary.ItemsSource = null;
+        if (_snapshot is null) return;
+        var snapshot = _snapshot;
+        RdpRememberedLayout? saved = null;
+        try
+        {
+            // Resolve remembered choices only after fresh RDP IDs are available.
+            if (snapshot.Monitors.All(m => m.RdpId >= 0)) saved = RdpLayoutPolicy.Recall(_connection, snapshot.Monitors);
+            _hint = saved is null ? "Choose monitors for this connection. The split physical display is unavailable." : "Suggested: your last launched layout for this monitor set.";
+        }
+        catch (InvalidOperationException ex) { _hint = ex.Message + " Choose a new layout; the previous one has been retained."; }
+        foreach (var monitor in snapshot.Monitors)
+        {
+            var row = new DockPanel { Margin = new Thickness(0, 3, 0, 3) };
+            string detail = monitor.BlockedReason.Length > 0 ? " — " + monitor.BlockedReason : monitor.RdpId >= 0 ? $"  [RDP {monitor.RdpId}]" : " — RDP ID pending";
+            var check = new CheckBox { Content = new TextBlock { Text = monitor.Label + detail, TextWrapping = TextWrapping.Wrap, MaxWidth = 660 },
+                IsEnabled = monitor.CanSelect, IsChecked = monitor.CanSelect && saved?.SelectedIds.Contains(monitor.StableId) == true,
+                VerticalAlignment = VerticalAlignment.Center };
+            if (monitor.StableId.Length == 0 && monitor.BlockedReason.Length == 0)
+            {
+                var confirm = new Button { Content = "Confirm identity…", Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(8, 0, 0, 0) };
+                DockPanel.SetDock(confirm, Dock.Right); row.Children.Add(confirm);
+                confirm.Click += async (_, _) =>
+                {
+                    if (MessageBox.Show(this, "Confirm a new stable identity for this monitor?\n\n" + monitor.Label +
+                        "\n\nTo reconnect it to an existing ID instead, use Identity details in the main window.", "Confirm monitor identity",
+                        MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+                    try
+                    {
+                        if (_systemBusy()) throw new InvalidOperationException("Wait for Apply/Revert to finish.");
+                        confirm.IsEnabled = false; MonitorRows.IsEnabled = false; RefreshButton.IsEnabled = false;
+                        await Task.Run(() => MonitorIdentityStore.Confirm(snapshot.Sources.Single(m => m.DeviceName == monitor.GdiName), null));
+                        await RefreshAsync();
+                    }
+                    catch (Exception ex) { Status.Text = ex.Message; confirm.IsEnabled = true; }
+                    finally { MonitorRows.IsEnabled = true; RefreshButton.IsEnabled = true; }
+                };
+            }
+            row.Children.Add(check); MonitorRows.Children.Add(row); _rows.Add((monitor, check));
+            check.Checked += (_, _) => SelectionChanged(); check.Unchecked += (_, _) => SelectionChanged();
+        }
+        SelectionChanged();
+        if (saved is not null) Primary.SelectedItem = snapshot.Monitors.Single(m => m.StableId == saved.PrimaryId);
     }
 
     private void SelectionChanged()
@@ -94,7 +118,9 @@ public partial class RdpMonitorWindow : Window
     private void ValidateSelection()
     {
         ConnectButton.IsEnabled = false;
-        if (_loading || _connecting || _requiresRefresh || _snapshot is null) return;
+        if (_loading || _connecting || _requiresRefresh) return;
+        if (_probeError.Length > 0) { Status.Text = _probeError; return; }
+        if (_snapshot is null) return;
         try
         {
             if (_systemBusy()) throw new InvalidOperationException("Wait for Apply/Revert to finish, then refresh.");
@@ -111,20 +137,29 @@ public partial class RdpMonitorWindow : Window
         if (_snapshot is null || _snapshot.Monitors.Count == 0) return;
         var monitors = _snapshot.Monitors;
         int left = monitors.Min(m => m.X), top = monitors.Min(m => m.Y);
-        double scale = Math.Min(780.0 / Math.Max(1, monitors.Max(m => m.Right) - left), 150.0 / Math.Max(1, monitors.Max(m => m.Bottom) - top));
+        double extentWidth = Math.Max(1, monitors.Max(m => m.Right) - left);
+        double extentHeight = Math.Max(1, monitors.Max(m => m.Bottom) - top);
+        double scale = Math.Min(860.0 / extentWidth, 230.0 / extentHeight);
+        double offsetX = (900 - extentWidth * scale) / 2, offsetY = (260 - extentHeight * scale) / 2;
         foreach (var m in monitors)
         {
             bool selected = _rows.Any(x => x.Monitor == m && x.Check.IsChecked == true);
-            var tile = new Border { Width = m.Width * scale, Height = m.Height * scale, Background = selected ? Brushes.SteelBlue : Brushes.DimGray,
-                BorderBrush = (Primary.SelectedItem as RdpMonitor)?.StableId == m.StableId && m.StableId.Length > 0 ? Brushes.Gold : Brushes.White,
-                BorderThickness = new Thickness(2), ToolTip = m.Label, Cursor = System.Windows.Input.Cursors.Hand,
-                Child = new TextBlock { Text = $"{(m.StableId.Length > 0 ? m.StableId : "Confirm ID")}\nRDP {m.RdpId}\n{m.Width} × {m.Height}",
-                    Foreground = Brushes.White, TextAlignment = TextAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontSize = 11 } };
-            Canvas.SetLeft(tile, 10 + (m.X - (double)left) * scale); Canvas.SetTop(tile, 10 + (m.Y - (double)top) * scale);
+            var label = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            label.Children.Add(new TextBlock { Text = m.WindowsNumber > 0 && m.WindowsNumber < int.MaxValue ? m.WindowsNumber.ToString() : "?",
+                Foreground = Brushes.White, TextAlignment = TextAlignment.Center, FontSize = 28, FontWeight = FontWeights.SemiBold });
+            if (m.BlockedReason.Length > 0) label.Children.Add(new TextBlock { Text = "Split source / unavailable", Foreground = Brushes.LightGray,
+                TextAlignment = TextAlignment.Center, FontSize = 10, TextWrapping = TextWrapping.Wrap });
+            var tile = new Border { Width = m.Width * scale, Height = m.Height * scale,
+                Background = !m.CanSelect ? Brushes.DarkSlateGray : selected ? Brushes.SteelBlue : Brushes.DimGray,
+                BorderBrush = (Primary.SelectedItem as RdpMonitor)?.StableId == m.StableId && m.CanSelect ? Brushes.Gold : Brushes.LightGray,
+                BorderThickness = new Thickness(2), CornerRadius = new CornerRadius(4), Opacity = m.BlockedReason.Length > 0 ? 0.5 : 1,
+                ToolTip = m.Label + (m.BlockedReason.Length > 0 ? "\n" + m.BlockedReason : ""),
+                Cursor = m.CanSelect ? System.Windows.Input.Cursors.Hand : System.Windows.Input.Cursors.No, Child = label };
+            Canvas.SetLeft(tile, offsetX + (m.X - (double)left) * scale); Canvas.SetTop(tile, offsetY + (m.Y - (double)top) * scale);
             tile.MouseLeftButtonUp += (_, _) =>
             {
                 var row = _rows.Single(x => x.Monitor == m);
-                if (row.Check.IsEnabled && !_connecting) row.Check.IsChecked = row.Check.IsChecked != true;
+                if (row.Check.IsEnabled && !_loading && !_connecting) row.Check.IsChecked = row.Check.IsChecked != true;
             };
             Map.Children.Add(tile);
         }

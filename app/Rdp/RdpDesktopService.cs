@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Text;
 using DesktopSplitter.Interop;
 using DesktopSplitter.Models;
@@ -10,24 +9,60 @@ namespace DesktopSplitter.Rdp;
 public sealed record RdpDesktopSnapshot(IReadOnlyList<RdpMonitor> Monitors, IReadOnlyList<MonitorInfo> Sources);
 
 /// <summary>Reads mstsc's actual IDs, never DISPLAYn minus one or enumeration order.</summary>
-public sealed class RdpDesktopService
+public interface IRdpDesktopService
+{
+    Task<RdpDesktopSnapshot> ReadWindowsAsync();
+    Task<RdpDesktopSnapshot> ResolveAsync(RdpDesktopSnapshot before);
+    Task<RdpDesktopSnapshot> ReadAsync();
+    void Launch(string content);
+}
+
+public sealed class RdpDesktopService : IRdpDesktopService
 {
     public static string ClientPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "mstsc.exe");
 
-    public Task<RdpDesktopSnapshot> ReadAsync() => Task.Run(async () =>
+    public Task<RdpDesktopSnapshot> ReadWindowsAsync() => Task.Run(() =>
     {
-        var before = DisplayConfig.Enumerate();
-        string listing = await ReadClientMonitorListAsync().ConfigureAwait(false);
-        var after = DisplayConfig.Enumerate();
-        string Fingerprint(IReadOnlyList<MonitorInfo> monitors) => string.Join("|", monitors.OrderBy(m => m.MonitorDevicePath, StringComparer.Ordinal)
-            .Select(m => $"{m.MonitorDevicePath}:{m.StableMonitorId}:{m.DeviceName}:{m.PositionX}:{m.PositionY}:{m.CurrentWidth}:{m.CurrentHeight}"));
-        if (Fingerprint(before) != Fingerprint(after)) throw new InvalidOperationException("Displays changed while reading the RDP monitor list. Refresh and choose again.");
-        var listed = RdpLayoutPolicy.ParseMonitorList(listing);
-        var observations = after.Select(m => new RdpMonitor(m.StableMonitorId, m.Caption, m.DeviceName, -1,
-            m.PositionX, m.PositionY, m.CurrentWidth, m.CurrentHeight, m.IsPrimary)).ToList();
-        var result = RdpLayoutPolicy.BindClientIds(observations, listed);
-        return new RdpDesktopSnapshot(result, after);
+        var sources = DisplayConfig.Enumerate();
+        string sourceId = string.Empty;
+        string stateError = string.Empty;
+        try
+        {
+            var state = Services.PrimaryPreferenceStore.Default.Read();
+            if (sources.Any(m => m.IsDeskSplitVirtual))
+            {
+                sourceId = state?.SplitPhysicalId ?? string.Empty;
+                if (sourceId.Length == 0)
+                {
+                    var settings = Services.SettingsStore.Load();
+                    if (settings?.HasConfirmedIdentity == true) sourceId = settings.PhysicalStableMonitorId;
+                }
+                if (sourceId.Length == 0) stateError = "The split physical source could not be identified. Restore or confirm its identity before connecting.";
+            }
+        }
+        catch (Exception ex) { stateError = "Split state could not be verified: " + ex.Message; }
+        var monitors = sources.Select(m => new RdpMonitor(m.StableMonitorId, m.Caption, m.DeviceName, -1,
+            m.PositionX, m.PositionY, m.CurrentWidth, m.CurrentHeight, m.IsPrimary)
+            { WindowsNumber = m.Index, BlockedReason = stateError.Length > 0 ? stateError :
+                sourceId.Length > 0 && m.StableMonitorId == sourceId ? "Split physical display — select its virtual monitors instead" : string.Empty }).ToList();
+        return new RdpDesktopSnapshot(monitors, sources);
     });
+
+    public async Task<RdpDesktopSnapshot> ReadAsync()
+    {
+        var before = await ReadWindowsAsync();
+        return await ResolveAsync(before);
+    }
+
+    public async Task<RdpDesktopSnapshot> ResolveAsync(RdpDesktopSnapshot before)
+    {
+        // Do not hide the probe at startup: modern mstsc needs a realized UI to expose its text.
+        string listing = await Task.Run(() => RdpMonitorProbe.ReadAsync(new ProcessStartInfo(ClientPath, "/l") { UseShellExecute = false }));
+        var after = await ReadWindowsAsync();
+        if (RdpLayoutPolicy.SnapshotKey(before.Monitors) != RdpLayoutPolicy.SnapshotKey(after.Monitors))
+            throw new InvalidOperationException("Displays changed while reading RDP IDs. Refresh and choose again.");
+        return new RdpDesktopSnapshot(RdpLayoutPolicy.BindClientIds(after.Monitors, RdpLayoutPolicy.ParseMonitorList(listing)), after.Sources);
+    }
 
     public void Launch(string content)
     {
@@ -43,60 +78,4 @@ public sealed class RdpDesktopService
         // Each launch has a different path, so active sessions cannot overwrite one another.
     }
 
-    private static async Task<string> ReadClientMonitorListAsync()
-    {
-        var start = new ProcessStartInfo(ClientPath, "/l")
-        { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not read RDP monitor IDs.");
-        IntPtr dialog = IntPtr.Zero;
-        try
-        {
-            var timer = Stopwatch.StartNew();
-            while (timer.Elapsed < TimeSpan.FromSeconds(6))
-            {
-                var parts = new List<string>();
-                EnumWindows((window, _) =>
-                {
-                    GetWindowThreadProcessId(window, out uint pid);
-                    if (pid != process.Id) return true;
-                    var name = new StringBuilder(64);
-                    GetClassName(window, name, name.Capacity);
-                    if (name.ToString() != "#32770") return true;
-                    dialog = window;
-                    ShowWindow(window, 0);
-                    EnumChildWindows(window, (child, _) =>
-                    {
-                        var text = new StringBuilder(32768);
-                        if (SendMessageTimeout(child, 0x000D, (IntPtr)text.Capacity, text, 2, 200, out _) != IntPtr.Zero)
-                            parts.Add(text.ToString());
-                        return true;
-                    }, IntPtr.Zero);
-                    return false;
-                }, IntPtr.Zero);
-                string text = string.Join("\n", parts);
-                if (text.Contains(';') && text.Contains('(')) return text;
-                if (process.HasExited) break;
-                await Task.Delay(100).ConfigureAwait(false);
-            }
-            throw new InvalidOperationException("Could not read mstsc /l. Close its monitor-list dialog if still visible and refresh. No connection was started.");
-        }
-        finally
-        {
-            // Close only the monitor-list dialog owned by the exact process we created.
-            if (dialog != IntPtr.Zero)
-            {
-                GetWindowThreadProcessId(dialog, out uint owner);
-                if (owner == process.Id) PostMessage(dialog, 0x0010, IntPtr.Zero, IntPtr.Zero);
-            }
-        }
-    }
-
-    private delegate bool EnumWindowProc(IntPtr window, IntPtr parameter);
-    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowProc callback, IntPtr parameter);
-    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumWindowProc callback, IntPtr parameter);
-    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder name, int count);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wparam, StringBuilder text, uint flags, uint timeout, out IntPtr result);
-    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
-    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
 }
