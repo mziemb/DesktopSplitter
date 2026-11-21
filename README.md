@@ -10,6 +10,17 @@ end).
 Works on any GPU vendor (AMD, NVIDIA, Intel): it is built on **IddCx**,
 Microsoft's Indirect Display Driver framework, with no vendor-specific APIs.
 
+## MZ releases
+
+This fork of [swiiftex/DesktopSplitter](https://github.com/swiiftex/DesktopSplitter)
+starts its own version series at `1.0.0`. GitHub releases use the name
+`DesktopSplitter MZ 1.0.0` and tag `mz-v1.0.0`. The matching installer is
+`DesktopSplitterSetup-MZ-1.0.0.exe`.
+
+Open **About** in the main window to see the release, UTC build date and build
+number. GitHub Actions builds use the workflow run number and attempt
+(`run.attempt`). Local builds use a UTC build number in `yyyyMMddHHmmss` format.
+
 ## Installing
 
 Run **`DesktopSplitterSetup.exe`** — a single-file, dependency-free installer

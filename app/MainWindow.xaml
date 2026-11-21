@@ -1,7 +1,7 @@
 <Window x:Class="DesktopSplitter.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DesktopSplitter"
+        Title="DesktopSplitter MZ"
         Height="900" Width="960"
         MinHeight="680" MinWidth="820"
         Background="{StaticResource WindowBackground}"
@@ -179,9 +179,11 @@
         <!-- Header -->
         <StackPanel Grid.Row="0" Margin="0,0,0,12">
             <StackPanel Orientation="Horizontal">
-                <TextBlock Text="DesktopSplitter" FontSize="19" FontWeight="SemiBold"/>
+                <TextBlock Text="DesktopSplitter MZ" FontSize="19" FontWeight="SemiBold"/>
                 <TextBlock x:Name="VersionLabel" VerticalAlignment="Bottom" Margin="8,0,0,3"
                            FontSize="11" Foreground="{StaticResource MutedBrush}"/>
+                <Button Content="About…" Click="About_Click" Margin="12,0,0,0"
+                        Padding="8,2" VerticalAlignment="Center"/>
             </StackPanel>
             <TextBlock Text="{Binding DriverStatus}" Foreground="{StaticResource MutedBrush}"
                        Margin="0,4,0,0" TextWrapping="Wrap"/>
