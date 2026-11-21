@@ -2,10 +2,9 @@
 
 ## Status and confirmed findings
 
-This change is based on dev/codex-desktopsplitter commit
-6b39359ffdda7dc465717ee447ee386a80157992, including the stable monitor identity
-and global Revert changes already merged into that base. It does not merge other
-branches, change the driver INF/protocol, or install a driver during CI.
+Installer verification integrates with stable monitor identification and the
+global Revert shortcut. It preserves the driver INF and protocol. CI checks
+compile and verify the package without installing a display driver.
 
 **The cause of the reported machine's Code 12 has not been established.** No
 Windows 11 installation log, device-instance snapshot or setupapi.dev.log from

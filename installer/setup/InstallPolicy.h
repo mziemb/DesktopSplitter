@@ -89,7 +89,7 @@ inline StageResult EvaluateDevice(const DeviceEvidence& e) {
     if (!e.statusRead) return StageResult::Fail(31, L"CM_Get_DevNode_Status failed; health is unknown", L"ConfigurationManager");
     if (e.problem != 0 && e.problem != 14) // CM_PROB_NEED_RESTART is decimal 14, not Win32 3010.
         return StageResult::Fail(e.problem, e.problem == 12
-            ? L"CM_PROB_NORMAL_CONFLICT (PnP Code 12). Nie ustalono przyczyny. Collect setupapi.dev.log and device status."
+            ? L"CM_PROB_NORMAL_CONFLICT (PnP Code 12). The cause has not been established. Collect setupapi.dev.log and device status."
             : L"PnP device reports a problem; driver is not operational", L"PnP");
     if (e.replied && e.validReply && e.activeMonitors != 0)
         return StageResult::Fail(170, L"Virtual monitors became active during installation; restore the split using its owning app before retrying");
