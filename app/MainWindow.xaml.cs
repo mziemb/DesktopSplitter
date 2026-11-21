@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -14,7 +15,17 @@ namespace DesktopSplitter;
 public partial class MainWindow : Window, IHidingUi
 {
     private const int WM_DISPLAYCHANGE = 0x007E;
+    private const int WM_DEVICECHANGE = 0x0219, WM_POWERBROADCAST = 0x0218;
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr RegisterPowerSettingNotification(IntPtr recipient, ref Guid setting, uint flags);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterPowerSettingNotification(IntPtr handle);
+    [StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct PowerSetting { public Guid Setting; public uint Length; }
+    private IntPtr _powerNotification;
 
+
+    private InstallerShutdownHook? _installerExitHook;
     private readonly MainViewModel _viewModel;
     private readonly TrayIconService? _tray;
     private readonly DispatcherTimer _displayChangeDebounce;
@@ -48,6 +59,58 @@ public partial class MainWindow : Window, IHidingUi
             ? "DesktopSplitter"
             : $"DesktopSplitter {MainViewModel.VersionText}";
         VersionLabel.Text = MainViewModel.VersionText;
+    }
+
+    private void IdentityDetails_Click(object sender, RoutedEventArgs e)
+    {
+        MonitorInfo? monitor = _viewModel.SelectedMonitor;
+        if (monitor is null) return;
+        try
+        {
+            var dialog = new Window { Owner = this, Title = "Monitor identity — explicit confirmation",
+                Width = 720, Height = 540, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+            var panel = new StackPanel { Margin = new Thickness(16) };
+            panel.Children.Add(new TextBox { Text = monitor.IdentityDetails, IsReadOnly = true,
+                TextWrapping = TextWrapping.Wrap, Height = 220, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+            panel.Children.Add(new TextBlock { Text = "Confirm only after checking the physical display. Identical devices without reliable serials cannot be distinguished after a port swap.",
+                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0,12,0,12) });
+            var records = MonitorIdentityStore.PhysicalRecords();
+            var choices = new ComboBox();
+            choices.Items.Add("Create a new logical monitor ID");
+            foreach (var record in records) choices.Items.Add(record.StableMonitorId + " — " + record.MonitorDevicePath);
+            choices.SelectedIndex = 0;
+            panel.Children.Add(choices);
+            var settings = SettingsStore.Load();
+            var recovery = new CheckBox { Content = "This selected monitor is the hidden monitor recorded by the legacy settings",
+                IsEnabled = !string.IsNullOrEmpty(settings?.SpecializedDevice) && string.IsNullOrEmpty(settings.SpecializedStableMonitorId),
+                Margin = new Thickness(0,12,0,12) };
+            panel.Children.Add(recovery);
+            var confirm = new Button { Content = "Confirm selected physical monitor", Margin = new Thickness(0,12,0,0) };
+            confirm.Click += (_, _) =>
+            {
+                try
+                {
+                    MonitorIdentityStore.Confirm(monitor, choices.SelectedIndex <= 0 ? null : records[choices.SelectedIndex - 1].StableMonitorId);
+                    if (settings is not null && !settings.HasConfirmedIdentity)
+                    {
+                        MonitorSettingsMigration.ConfirmSelection(settings, monitor.StableMonitorId, recovery.IsChecked == true);
+                        SettingsStore.Save(settings);
+                    }
+                    else if (settings is not null && recovery.IsChecked == true)
+                    {
+                        settings.SpecializedStableMonitorId = monitor.StableMonitorId;
+                        SettingsStore.Save(settings);
+                    }
+                    dialog.Close();
+                    _viewModel.LoadMonitors(announce: true);
+                }
+                catch (Exception ex) { MessageBox.Show(dialog, ex.Message, "Identity conflict"); }
+            };
+            panel.Children.Add(confirm);
+            dialog.Content = panel;
+            dialog.ShowDialog();
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Identity conflict"); }
     }
 
     // ------------------------------------------------------------------ IHidingUi
@@ -135,14 +198,35 @@ public partial class MainWindow : Window, IHidingUi
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        if (PresentationSource.FromVisual(this) is HwndSource source)
-            source.AddHook(WndProc);
+        // EnsureHandle can create a hidden HWND before the window has a visual
+        // presentation source (startup-to-tray). Attach by HWND, not by Visual.
+        IntPtr handle = new WindowInteropHelper(this).Handle;
+        HwndSource.FromHwnd(handle)?.AddHook(WndProc);
+        var displayPower = new Guid("6FE69556-704A-47A0-8F24-C28D936FDA47"); // GUID_CONSOLE_DISPLAY_STATE
+        _powerNotification = RegisterPowerSettingNotification(handle, ref displayPower, 0);
+        _installerExitHook = new InstallerShutdownHook(handle, () => _viewModel.IsBusy,
+            () => Dispatcher.BeginInvoke(new Action(() => (Application.Current as App)?.ExitApplication())));
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _installerExitHook?.Dispose();
+        if (_powerNotification != IntPtr.Zero) UnregisterPowerSettingNotification(_powerNotification);
+        base.OnClosed(e);
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (msg == WM_DEVICECHANGE || msg == WM_POWERBROADCAST)
+            _viewModel.NotifyDisplayLifecycleChange();
+        if (msg == WM_POWERBROADCAST && wParam.ToInt64() == 0x8013 && lParam != IntPtr.Zero) {
+            var setting = Marshal.PtrToStructure<PowerSetting>(lParam);
+            if (setting.Setting == new Guid("6FE69556-704A-47A0-8F24-C28D936FDA47") && setting.Length == 4)
+                _viewModel.NotifyDisplayLifecycleChange(Marshal.ReadInt32(lParam, 20) == 0);
+        }
         if (msg == WM_DISPLAYCHANGE)
         {
+            _viewModel.NotifyPrimaryDisplayChange(PrimaryChangeIntent.ObserveSettingsInteraction());
             _displayChangeDebounce.Stop();
             _displayChangeDebounce.Start();
         }

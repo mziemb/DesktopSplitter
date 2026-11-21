@@ -3,6 +3,7 @@
 #pragma once
 
 #include <windows.h>
+#include <functional>
 
 namespace DeskSplit
 {
@@ -15,6 +16,11 @@ namespace DeskSplit
     extern const wchar_t kProductName[];
     extern const wchar_t kPublisher[];
     extern const wchar_t kProductVersion[];
+
+    struct IStepSink;
+    DWORD CheckProductFilesWritable(const wchar_t* InstallDir, IStepSink* Sink);
+    DWORD PrepareProductFile(const wchar_t* Path, IStepSink* Sink = nullptr);
+    DWORD CheckPendingProductRemoval(const wchar_t* InstallDir, IStepSink* Sink);
 
     struct InstallOptions
     {
@@ -34,19 +40,19 @@ namespace DeskSplit
     // Writes DesktopSplitter.exe, dscomp.exe, devcreate.exe and the compositor
     // README into InstallDir, and copies this setup executable in as
     // DesktopSplitterSetup.exe so uninstall works without the original file.
-    DWORD InstallProductFiles(_In_z_ const wchar_t* InstallDir, _Out_ DWORD* pBytesWritten);
+    DWORD InstallProductFiles(_In_z_ const wchar_t* InstallDir, _Out_ DWORD* pBytesWritten, IStepSink* Sink = nullptr);
 
     // Shortcuts. Desktop = common desktop, Start menu = common programs.
     DWORD CreateShortcuts(_In_ const InstallOptions* pOptions);
-    void  RemoveShortcuts();
+    DWORD RemoveShortcuts();
 
     // Add/Remove Programs entry.
     DWORD WriteUninstallEntry(_In_ const InstallOptions* pOptions, _In_ DWORD EstimatedSizeKb);
-    void  RemoveUninstallEntry();
+    DWORD RemoveUninstallEntry();
 
     // HKLM\SOFTWARE\DesktopSplitter feature flags.
     DWORD WriteProductFlags(_In_ const InstallOptions* pOptions);
-    void  RemoveProductFlags();
+    DWORD RemoveProductFlags();
 
     // Reads the existing installation, if any. Returns false when not installed.
     bool ReadInstalledState(
@@ -55,7 +61,11 @@ namespace DeskSplit
 
     // Deletes the installed files and the install directory. The running setup
     // copy inside InstallDir is scheduled for delete-on-reboot if it is us.
-    DWORD RemoveProductFiles(_In_z_ const wchar_t* InstallDir);
+    DWORD RemoveProductFiles(_In_z_ const wchar_t* InstallDir, IStepSink* Sink = nullptr);
+
+    // Exact identity/session/user; graceful first, guarded idle-only forced fallback.
+    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount, IStepSink* Sink = nullptr,
+        const std::function<bool()>& ConfirmIdleForForce = {});
 
     // Stops DesktopSplitter.exe / dscomp.exe before an upgrade or uninstall.
     void StopRunningProcesses(_Out_ int* pStoppedCount);

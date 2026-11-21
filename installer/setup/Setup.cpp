@@ -19,6 +19,7 @@
 #include <strsafe.h>
 
 #include "InstallEngine.h"
+#include "SetupRuntime.h"
 #include "Payload.h"
 #include "Trust.h"
 #include "DriverPackage.h"
@@ -154,8 +155,8 @@ namespace
 
             if (g_Quiet)
             {
-                Out(L"    /quiet specified - proceeding without asking.\n");
-                return true;
+                Out(L"    /quiet does not authorize certificate-store changes. Use interactive mode to review and explicitly consent.\n");
+                return false;
             }
 
             for (;;)
@@ -192,6 +193,7 @@ namespace
             L"                                           installed, change nothing (no admin)\n"
             L"  DesktopSplitterSetup.exe /?              this help\n"
             L"\n"
+            L"  DesktopSplitterSetup.exe /verify-installed  verify installed runtime after reboot (no PnP changes)\n"
             L"Options (console modes):\n"
             L"  /dir <path>   install location (default %%ProgramFiles%%\\DesktopSplitter)\n"
             L"  /noshortcut   do not create desktop or Start menu shortcuts\n"
@@ -201,13 +203,18 @@ namespace
             L"  /keeptemp     keep the unpacked driver package for diagnostics\n"
             L"\n"
             L"Exit codes:\n"
+            L"   3010 restart required; after install verify runtime, after removal restart before reinstall\n"
             L"   0 success                    7 certificate installation failed\n"
             L"   1 bad command line           8 driver package installation failed\n"
             L"   2 not elevated               9 device node creation failed\n"
             L"   3 embedded package missing  10 post-install verification failed\n"
             L"   4 package extraction failed 11 uninstall failed\n"
             L"   5 catalog unusable          12 copying program files failed\n"
-            L"   6 trust declined by user    13 cancelled\n");
+            L"   6 trust declined by user    13 cancelled\n"
+            L"  14 registration failed       15 durable log unavailable/failed\n"
+            L"  16 previous removal pending; restart before installation\n"
+            L"  17 GUI handoff / quiet requires external installer copy\n"
+            L"  18 another setup is running / handoff parent did not exit\n");
     }
 
     // ---- /verify ----------------------------------------------------------
@@ -328,7 +335,7 @@ namespace
     }
 }
 
-int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int)
+int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR RawArguments, _In_ int)
 {
     int ArgCount = 0;
     LPWSTR* Args = CommandLineToArgvW(GetCommandLineW(), &ArgCount);
@@ -337,9 +344,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR, 
         return ExitUsage;
     }
 
-    bool WantUninstall = false, WantVerify = false, WantHelp = false, WantSelfTest = false;
+    bool WantUninstall = false, WantVerify = false, WantHelp = false, WantSelfTest = false, WantInstalledVerify = false;
     bool RemoveCert = false, KeepTemp = false, NoShortcut = false, HideDisplay = false;
     const wchar_t* DirOverride = nullptr;
+    ULONG_PTR setupParent = 0;
 
     for (int Index = 1; Index < ArgCount; ++Index)
     {
@@ -358,7 +366,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR, 
         else if (!_wcsicmp(Arg, L"keeptemp"))                                        KeepTemp = true;
         else if (!_wcsicmp(Arg, L"noshortcut"))                                      NoShortcut = true;
         else if (!_wcsicmp(Arg, L"hidedisplay"))                                     HideDisplay = true;
+        else if (!_wcsicmp(Arg, L"verify-installed"))                                WantInstalledVerify = true;
         else if (!_wcsicmp(Arg, L"selftest"))                                        WantSelfTest = true;
+        else if (!_wcsicmp(Arg, L"setup-parent") && Index + 1 < ArgCount) setupParent = static_cast<ULONG_PTR>(_wcstoui64(Args[++Index], nullptr, 10));
         else if (!_wcsicmp(Arg, L"dir") && Index + 1 < ArgCount)                     DirOverride = Args[++Index];
         else
         {
@@ -418,6 +428,28 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR, 
         return ExitNotElevated;
     }
 
+    if (WantInstalledVerify)
+    {
+        EnsureConsole(); ConsoleSink sink;
+        return RunInstalledVerification(&sink);
+    }
+
+    if (setupParent && !WaitForSetupParent(setupParent)) return ExitSetupBusy;
+    if (!setupParent) {
+        int handoff = RelocateInstalledSetup(RawArguments, g_Quiet, DirOverride);
+        if (handoff != -1) {
+            if (g_Quiet) { EnsureConsole(); Out(L"Run a copy of the installer outside the installation directory; the installed EXE cannot replace itself synchronously (exit %d).\n", handoff); }
+            else if (handoff != ExitSetupHandoff) MessageBoxW(nullptr, L"Could not start a temporary installer. Run the downloaded package outside the installation directory.", L"DesktopSplitter Setup", MB_OK | MB_ICONERROR);
+            return handoff;
+        }
+    }
+    SetupInstanceLock mutationLock;
+    if (!mutationLock.Acquired) {
+        if (g_Quiet) { EnsureConsole(); Out(L"Another installer/uninstaller is running. Close it before retrying (exit 18).\n"); }
+        else MessageBoxW(nullptr, L"Another DesktopSplitter installer or uninstaller is running. Finish or close that window before retrying.", L"DesktopSplitter Setup", MB_OK | MB_ICONWARNING);
+        return ExitSetupBusy;
+    }
+
     if (g_Quiet)
     {
         EnsureConsole();
@@ -453,10 +485,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance, _In_opt_ HINSTANCE, _In_ LPWSTR, 
             Result = RunInstallSequence(&Options, &Sink);
         }
 
-        Out(L"\n%s (exit %d)\n", Result == ExitSuccess ? L"Completed." : L"Failed.", Result);
+        const wchar_t* summary = Result == ExitSuccess ? (WantUninstall ? L"Removal complete." : L"Verified ready.")
+            : Result == ExitRestartRequired ? (WantUninstall ? L"Removal pending restart; restart before reinstalling." : L"Restart required; verification pending.")
+            : Result == ExitPendingRemoval ? L"Previous removal pending; restart before installation. Installation was not performed."
+            : L"Failed / incomplete.";
+        Out(L"\n%s (exit %d)\n", summary, Result);
         return Result;
     }
 
     // ---- graphical wizard --------------------------------------------------
-    return RunWizard(Instance, WantUninstall ? WizardMode::Uninstall : WizardMode::Install);
+    int result = RunWizard(Instance, WantUninstall ? WizardMode::Uninstall : WizardMode::Install);
+    if (setupParent) ScheduleWorkerCleanup();
+    return result;
 }

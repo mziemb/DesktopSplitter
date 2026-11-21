@@ -5,6 +5,15 @@ namespace DesktopSplitter.Models;
 /// <summary>%APPDATA%\DesktopSplitter\settings.json — last applied UI state.</summary>
 public sealed class AppSettings
 {
+    [JsonPropertyName("globalRevertHotkeyEnabled")] public bool GlobalRevertHotkeyEnabled { get; set; } = true;
+    [JsonPropertyName("globalRevertHotkey")] public string GlobalRevertHotkey { get; set; } = RevertHotkey.DefaultGesture;
+    public int IdentitySchemaVersion { get; set; }
+    public string PhysicalStableMonitorId { get; set; } = string.Empty;
+    public string PreviousPrimaryStableMonitorId { get; set; } = string.Empty;
+    public string AppliedPrimaryStableMonitorId { get; set; } = string.Empty;
+    public string SpecializedStableMonitorId { get; set; } = string.Empty;
+    public bool HasConfirmedIdentity => IdentitySchemaVersion == 1 && PhysicalStableMonitorId.Length > 0;
+
     [JsonPropertyName("physicalDevice")]
     public string PhysicalDevice { get; set; } = string.Empty;
 
@@ -29,7 +38,7 @@ public sealed class AppSettings
     [JsonPropertyName("previousPrimaryFriendlyName")]
     public string PreviousPrimaryFriendlyName { get; set; } = string.Empty;
 
-    /// <summary>Device name of the virtual monitor that Apply promoted to primary (segment 1).</summary>
+    /// <summary>Legacy diagnostic address of the primary selected by Apply; primary-preferences.json owns durable intent.</summary>
     [JsonPropertyName("appliedPrimaryDevice")]
     public string AppliedPrimaryDevice { get; set; } = string.Empty;
 

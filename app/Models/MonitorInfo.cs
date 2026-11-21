@@ -7,6 +7,14 @@ namespace DesktopSplitter.Models;
 /// </summary>
 public sealed class MonitorInfo
 {
+    public MonitorIdentity? Identity { get; set; }
+    public string StableMonitorId => Identity?.StableMonitorId ?? string.Empty;
+    public string IdentityConflict { get; set; } = string.Empty;
+    public bool IsActive { get; init; } = true;
+    public int EdidProductCode { get; init; } = -1;
+    public string GdiDeviceName => DeviceName;
+    public string IdentityDetails => $"ID: {StableMonitorId}\n{IdentityConflict}\nPath: {MonitorDevicePath}\nAdapter: {AdapterPath}\nTarget: {AdapterIdHigh:X8}-{AdapterIdLow:X8}/{TargetId}\nEDID: {Edid}\nWindows: {DeviceName}\nActive: {IsActive}";
+
     /// <summary>GDI device name, e.g. <c>\\.\DISPLAY1</c>.</summary>
     public string DeviceName { get; init; } = string.Empty;
 
@@ -99,7 +107,7 @@ public sealed class MonitorInfo
                 : "unknown size";
             string hz = MaxRefreshHz > 0 ? $" @ {MaxRefreshHz}Hz" : string.Empty;
             string primary = IsPrimary ? "  (primary)" : string.Empty;
-            return $"{DisplayLabel} — {device} — {mode}{hz}{primary}";
+            return $"{(IsDeskSplitVirtual ? $"DS-VIRTUAL-{DeskSplitMonitorIndex + 1:00}" : DisplayLabel)} — ID: {(StableMonitorId.Length > 0 ? StableMonitorId : "unconfirmed")} — Windows: {device} — {mode}{hz}{primary}";
         }
     }
 

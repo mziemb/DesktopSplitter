@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using DesktopSplitter.Models;
+using DesktopSplitter.Services;
 using static DesktopSplitter.Interop.NativeMethods;
 
 namespace DesktopSplitter.Interop;
@@ -69,6 +70,8 @@ public static class MonitorSpecialization
     /// <summary>Read-only probe. Never changes anything.</summary>
     public static bool TryGet(MonitorInfo monitor, out SpecializationState state, out int errorCode)
     {
+        if (!string.IsNullOrEmpty(monitor.StableMonitorId))
+            monitor = MonitorIdentityStore.Resolve(monitor.StableMonitorId, requireActive: false);
         var packet = default(DISPLAYCONFIG_GET_MONITOR_SPECIALIZATION);
         packet.header = BuildHeader(monitor,
             DISPLAYCONFIG_DEVICE_INFO_GET_MONITOR_SPECIALIZATION,
@@ -95,6 +98,7 @@ public static class MonitorSpecialization
     /// </summary>
     public static SpecializationResult Set(MonitorInfo monitor, bool enabled)
     {
+        monitor = MonitorIdentityStore.Resolve(monitor.StableMonitorId, requireActive: enabled);
         var packet = default(DISPLAYCONFIG_SET_MONITOR_SPECIALIZATION);
         packet.header = BuildHeader(monitor,
             DISPLAYCONFIG_DEVICE_INFO_SET_MONITOR_SPECIALIZATION,

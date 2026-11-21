@@ -1,270 +1,148 @@
 using System.Threading;
+using DesktopSplitter.Interop;
 using DesktopSplitter.Models;
 
 namespace DesktopSplitter.Services;
 
-/// <summary>What the compositor is currently asking for.</summary>
-public enum SuspensionRequest
-{
-    /// <summary>Neither event could be opened — the compositor probably is not running.</summary>
-    Unknown,
+public enum SuspensionRequest { Unknown, Active, Suspended }
 
-    /// <summary>The split should be active: segment 1 primary.</summary>
-    Active,
-
-    /// <summary>Secure desktop / lock / manual toggle: hand primary back to the physical monitor.</summary>
-    Suspended,
-}
-
-/// <summary>
-/// Watches the compositor's suspend/resume events and hands the PRIMARY display back and forth.
-///
-/// Windows draws UAC prompts, Ctrl+Alt+Del and the lock screen on the primary display. Under a
-/// split that is a virtual monitor which only exists through the compositor, so those screens have
-/// nowhere real to appear. While suspended we put primary back on the physical monitor; the
-/// virtual monitors and the compositor are deliberately left alone so the transition is fast and
-/// reversible.
-///
-/// The events are manual-reset and mutually exclusive, so this is written as LEVEL-triggered
-/// reconciliation rather than edge-triggered handling: every wake-up re-reads the desired state
-/// and moves towards it. That makes repeated signals idempotent for free, and lets the watcher
-/// recover from transitions it missed while an Apply held the display gate.
-/// </summary>
+/// <summary>Reconciles durable primary intent with topology/power/secure-desktop changes.</summary>
 public sealed class SplitSuspensionWatcher : IDisposable
 {
     public const string SuspendEventName = "DeskSplitSuspendRequest";
     public const string ResumeEventName = "DeskSplitResumeRequest";
-
-    /// <summary>Periodic re-check, so a missed or racing transition self-heals.</summary>
-    private static readonly TimeSpan ReconcilePeriod = TimeSpan.FromSeconds(2);
-
     private readonly IProgress<string> _log;
-    private readonly ManualResetEventSlim _stop = new(false);
     private readonly object _stateGate = new();
-
-    private Thread? _thread;
-    private EventWaitHandle? _suspend;
-    private EventWaitHandle? _resume;
-
-    /// <summary>Device that should be primary while the split is active (segment 1's virtual monitor).</summary>
-    private string _activePrimaryDevice = string.Empty;
-
-    /// <summary>Device that should be primary while suspended (the physical monitor).</summary>
-    private string _suspendedPrimaryDevice = string.Empty;
-
+    private readonly PrimaryPreferenceTracker _tracker = new();
+    private readonly PrimaryPreferenceWriteback _writeback = new();
+    private Run? _run;
+    private bool _restartRequested;
+    private int _displayUnavailable;
+    private EventWaitHandle? _suspend, _resume;
+    private int _displayEvent, _lifecycleEvent;
+    private bool _suspended;
+    private string _lastReason = "";
+    private DateTime _lastRecovery;
+    private sealed class Run { public readonly ManualResetEventSlim Stop = new(false); public readonly AutoResetEvent Wake = new(false); public Thread? Thread; }
     public SplitSuspensionWatcher(IProgress<string> log) => _log = log;
+    public bool IsSuspended => _suspended;
+    public bool IsRunning { get { lock (_stateGate) return _run is not null; } }
+    public void NotifyDisplayChanged(bool userIntent) { if (userIntent) Interlocked.Exchange(ref _displayEvent, 1); Wake(); }
+    public void NotifyLifecycleChanged(bool? unavailable = null) {
+        if (unavailable.HasValue) Interlocked.Exchange(ref _displayUnavailable, unavailable.Value ? 1 : 0);
+        Interlocked.Exchange(ref _lifecycleEvent, 1);
+        Wake();
+    }
 
-    /// <summary>True while primary has been handed back to the physical monitor.</summary>
-    public bool IsSuspended { get; private set; }
+    private void Wake() { lock (_stateGate) _run?.Wake.Set(); }
 
-    public bool IsRunning => _thread is not null;
-
-    /// <summary>
-    /// Starts watching for a live split. <paramref name="activePrimaryDevice"/> is segment 1's
-    /// virtual monitor, <paramref name="suspendedPrimaryDevice"/> the physical one.
-    /// </summary>
-    public void Start(string activePrimaryDevice, string suspendedPrimaryDevice)
+    public void Start()
     {
         lock (_stateGate)
         {
-            _activePrimaryDevice = activePrimaryDevice ?? string.Empty;
-            _suspendedPrimaryDevice = suspendedPrimaryDevice ?? string.Empty;
-
-            if (_thread is not null) return;
-            if (string.IsNullOrEmpty(_activePrimaryDevice) || string.IsNullOrEmpty(_suspendedPrimaryDevice))
-            {
-                _log.Report("Suspend/resume watcher not started: the primary displays are not known.");
-                return;
-            }
-
-            _stop.Reset();
-            IsSuspended = false;
-            _thread = new Thread(Loop) { IsBackground = true, Name = "DeskSplit suspend watcher" };
-            _thread.Start();
-            _log.Report("Watching for lock / UAC transitions (primary will move to " +
-                        $"{_suspendedPrimaryDevice} while they are on screen).");
+            if (_run is not null) { if (_run.Stop.IsSet) _restartRequested = true; return; }
+            _tracker.Invalidate(DateTime.UtcNow);
+            Interlocked.Exchange(ref _lifecycleEvent, 1);
+            var run = new Run();
+            run.Thread = new Thread(() => Loop(run)) { IsBackground = true, Name = "DesktopSplitter primary preferences" };
+            _run = run; run.Thread.Start();
         }
     }
-
-    /// <summary>
-    /// Stops watching. <paramref name="restorePrimary"/> is false when the caller is about to tear
-    /// the split down anyway — Revert restores primary itself, and doing it twice just adds churn.
-    /// </summary>
     public void Stop(bool restorePrimary)
     {
-        Thread? thread;
-        lock (_stateGate)
-        {
-            thread = _thread;
-            _thread = null;
-        }
-        if (thread is null) return;
-
-        _stop.Set();
-        try { thread.Join(TimeSpan.FromSeconds(3)); } catch { /* best effort */ }
-
-        if (restorePrimary && IsSuspended)
-        {
-            _log.Report("Restoring the split's primary display before stopping the watcher.");
-            MoveTo(_activePrimaryDevice, "segment 1");
-        }
-
-        IsSuspended = false;
-        CloseHandles();
-        _log.Report("Stopped watching for lock / UAC transitions.");
+        Run? run;
+        lock (_stateGate) { _restartRequested = false; run = _run; run?.Stop.Set(); }
+        run?.Thread?.Join(TimeSpan.FromSeconds(3));
+        // Intent remains on disk, including an offline pre-split monitor after Revert.
+        // The caller's explicit Apply/Revert owns any immediate restoration.
     }
-
-    /// <summary>
-    /// Reads the desired state without changing anything. Returns Unknown when neither event
-    /// exists (the compositor is not running).
-    /// </summary>
     public SuspensionRequest ReadDesiredState()
     {
-        EnsureHandles();
-        bool suspend = _suspend?.WaitOne(TimeSpan.Zero) ?? false;
-        bool resume = _resume?.WaitOne(TimeSpan.Zero) ?? false;
-
-        if (suspend && !resume) return SuspensionRequest.Suspended;
-        if (resume && !suspend) return SuspensionRequest.Active;
-        if (_suspend is null && _resume is null) return SuspensionRequest.Unknown;
-
-        // Both or neither: the compositor guarantees exclusivity, so this is a transient race.
-        // Treat it as "active" — the safe direction, since it never strands us suspended.
-        return SuspensionRequest.Active;
+        _suspend ??= TryOpen(SuspendEventName); _resume ??= TryOpen(ResumeEventName);
+        bool suspend = _suspend?.WaitOne(0) ?? false, resume = _resume?.WaitOne(0) ?? false;
+        return suspend && !resume ? SuspensionRequest.Suspended : resume && !suspend ? SuspensionRequest.Active : SuspensionRequest.Unknown;
     }
-
-    private void Loop()
+    private void Loop(Run run)
     {
-        while (!_stop.IsSet)
-        {
-            try
-            {
-                EnsureHandles();
-
-                // Wait on the event representing the state we are NOT in. Waiting on the
-                // currently-signalled one would spin, because these are manual-reset.
-                EventWaitHandle? target = IsSuspended ? _resume : _suspend;
-
-                if (target is null)
-                {
-                    _stop.Wait(ReconcilePeriod);
-                }
-                else
-                {
-                    WaitHandle.WaitAny(new[] { target, _stop.WaitHandle },
-                                       ReconcilePeriod);
-                }
-
-                if (_stop.IsSet) break;
-                Reconcile();
+        try {
+            while (!run.Stop.IsSet) {
+                try { Reconcile(); } catch (Exception ex) { Report("Primary reconciliation deferred: " + ex.Message); }
+                WaitHandle.WaitAny(new WaitHandle[] { run.Stop.WaitHandle, run.Wake }, 1000);
             }
-            catch (Exception ex)
-            {
-                _log.Report("Suspend/resume watcher error: " + ex.Message);
-                _stop.Wait(ReconcilePeriod);
+        } finally {
+            bool restart;
+            lock (_stateGate) {
+                _suspend?.Dispose(); _resume?.Dispose(); _suspend = _resume = null;
+                if (_run == run) _run = null;
+                run.Stop.Dispose(); run.Wake.Dispose();
+                restart = _restartRequested; _restartRequested = false;
             }
+            if (restart) Start();
         }
     }
-
-    /// <summary>Moves the primary display towards whatever the compositor is currently asking for.</summary>
     public void Reconcile()
     {
-        SuspensionRequest desired = ReadDesiredState();
-
-        // The compositor is gone. If a split is still up, make sure we are not left suspended.
-        if (desired == SuspensionRequest.Unknown)
-        {
-            if (IsSuspended && HidingStatus.IsSplitActive())
-            {
-                _log.Report("Compositor events disappeared while suspended — restoring the split's primary.");
-                if (MoveTo(_activePrimaryDevice, "segment 1")) IsSuspended = false;
+        // Never block a stopping thread behind Apply, and never mutate outside this gate.
+        if (!Monitor.TryEnter(ApplyService.DisplayOperationGate)) return;
+        try {
+            var state = _writeback.Flush(PrimaryPreferenceStore.Default.Read(), PrimaryPreferenceStore.Default.Write);
+            if (state is null) {
+                var legacy = SettingsStore.Load();
+                if (legacy?.HasConfirmedIdentity != true || string.IsNullOrEmpty(legacy.PreviousPrimaryStableMonitorId) || !HidingStatus.IsSplitActive()) return;
+                var primary = DisplayConfig.Enumerate().SingleOrDefault(m => m.IsPrimary);
+                if (primary is null || primary.StableMonitorId.Length == 0) return;
+                state = new PrimaryMonitorState { PreSplitId = legacy.PreviousPrimaryStableMonitorId,
+                    SplitPhysicalId = legacy.PhysicalStableMonitorId, DesiredId = primary.StableMonitorId,
+                    DesiredIsVirtual = primary.IsDeskSplitVirtual, SplitActive = true };
+                PrimaryPreferenceStore.Default.Write(state);
+                _log.Report("Migrated confirmed primary identities; current split primary retained. Historical manual intent cannot be inferred.");
             }
-            return;
-        }
-
-        bool wantSuspended = desired == SuspensionRequest.Suspended;
-        if (wantSuspended == IsSuspended) return;   // already there: repeated signals are no-ops
-
-        // Nothing to move primary between if the split is gone.
-        if (!HidingStatus.IsSplitActive())
-        {
-            IsSuspended = false;
-            return;
-        }
-
-        if (wantSuspended)
-        {
-            _log.Report("Lock screen / secure desktop detected — handing primary back to " +
-                        $"{_suspendedPrimaryDevice}.");
-            if (MoveTo(_suspendedPrimaryDevice, "the physical monitor")) IsSuspended = true;
-        }
-        else
-        {
-            _log.Report($"Secure desktop dismissed — returning primary to {_activePrimaryDevice}.");
-            if (MoveTo(_activePrimaryDevice, "segment 1")) IsSuspended = false;
-        }
-    }
-
-    /// <summary>
-    /// Performs the primary switch under the shared display gate, so it can never interleave with
-    /// a user-initiated Apply or Revert.
-    /// </summary>
-    private bool MoveTo(string device, string description)
-    {
-        if (string.IsNullOrEmpty(device)) return false;
-
-        lock (ApplyService.DisplayOperationGate)
-        {
-            // Re-check inside the gate: an Apply or Revert may have changed everything while we
-            // were queued behind it.
-            if (!HidingStatus.IsSplitActive())
-            {
-                _log.Report("Split is no longer active — skipping the primary switch.");
-                return false;
+            DateTime now = DateTime.UtcNow;
+            if (!state.SplitActive && now - _lastRecovery > TimeSpan.FromSeconds(30)) {
+                _lastRecovery = now;
+                var settings = SettingsStore.Load();
+                if (!string.IsNullOrEmpty(settings?.SpecializedStableMonitorId) &&
+                    DisplayConfig.EnumerateConnected().Any(m => m.StableMonitorId == settings.SpecializedStableMonitorId)) {
+                    try { ApplyService.RecoverStaleSpecialization(_log); }
+                    catch (Exception ex) { Report("Hidden-display recovery still pending: " + ex.Message); }
+                }
             }
-            return ApplyService.SwitchPrimaryTo(device, description, _log);
-        }
+            var live = DisplayConfig.Enumerate();
+            SuspensionRequest secure = ReadDesiredState();
+            if (!state.SplitActive) _suspended = false;
+            else if (secure != SuspensionRequest.Unknown) _suspended = secure == SuspensionRequest.Suspended;
+            var observations = live.Select(m => new PrimaryObservation(m.StableMonitorId, m.IsPrimary,
+                m.IsDeskSplitVirtual, m.CurrentWidth, m.CurrentHeight)).ToList();
+            bool manualIntent = Interlocked.Exchange(ref _displayEvent, 0) != 0;
+            // WM_DISPLAYCHANGE is not guaranteed for a primary-only change with unchanged
+            // resolution. Polling still needs a recent foreground Settings interaction.
+            string desired = state.RevertPending ? state.PreSplitId : state.DesiredId;
+            if (!manualIntent && !_suspended && !state.RevertPending && observations.Any(m => m.IsPrimary && m.Id != desired))
+                manualIntent = PrimaryChangeIntent.ObserveSettingsInteraction();
+            var decision = _tracker.Observe(state, observations, now,
+                manualIntent, Interlocked.Exchange(ref _lifecycleEvent, 0) != 0 || Volatile.Read(ref _displayUnavailable) != 0, _suspended);
+            if (decision.State != state) {
+                _writeback.Commit(state, decision.State, PrimaryPreferenceStore.Default.Write);
+                _log.Report($"Primary preference: pre-split={decision.State.PreSplitId}, desired={decision.State.DesiredId}, manual={decision.State.ManualOverride}, revertPending={decision.State.RevertPending}.");
+            }
+            Report(decision.Reason);
+            if (decision.TargetId.Length == 0) return;
+            if (live.Any(m => m.StableMonitorId == decision.TargetId && m.IsDeskSplitVirtual) && !CompositorLauncher.IsRunning()) {
+                Report("Virtual primary waits for a running compositor."); return;
+            }
+            _tracker.OwnSwitch(now); // Suppress our delayed WM_DISPLAYCHANGE notifications, including failed attempts.
+            ApplyService.SwitchPrimaryTo(decision.TargetId, "the remembered primary " + decision.TargetId, _log);
+        } finally { Monitor.Exit(ApplyService.DisplayOperationGate); }
     }
-
-    private void EnsureHandles()
-    {
-        _suspend ??= TryOpen(SuspendEventName);
-        _resume ??= TryOpen(ResumeEventName);
-    }
-
-    /// <summary>Opens a compositor event, preferring the Global namespace and falling back to Local.</summary>
+    private void Report(string reason) { if (_lastReason == reason) return; _lastReason = reason; _log.Report(reason); }
     private static EventWaitHandle? TryOpen(string name)
     {
-        foreach (string prefix in new[] { @"Global\", @"Local\" })
-        {
-            try
-            {
-                if (EventWaitHandle.TryOpenExisting(prefix + name, out EventWaitHandle? handle))
-                    return handle;
-            }
-            catch (UnauthorizedAccessException)
-            {
-                // Exists but this token cannot open it; try the other namespace.
-            }
-            catch (WaitHandleCannotBeOpenedException)
-            {
-                // Not created yet.
-            }
+        foreach (string prefix in new[] { @"Global\", @"Local\" }) {
+            try { if (EventWaitHandle.TryOpenExisting(prefix + name, out var handle)) return handle; }
+            catch (UnauthorizedAccessException) { }
+            catch (WaitHandleCannotBeOpenedException) { }
         }
         return null;
     }
-
-    private void CloseHandles()
-    {
-        _suspend?.Dispose();
-        _resume?.Dispose();
-        _suspend = null;
-        _resume = null;
-    }
-
-    public void Dispose()
-    {
-        Stop(restorePrimary: false);
-        _stop.Dispose();
-    }
+    public void Dispose() => Stop(false);
 }

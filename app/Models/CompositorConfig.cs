@@ -8,6 +8,10 @@ namespace DesktopSplitter.Models;
 /// </summary>
 public sealed class CompositorConfig
 {
+    [JsonPropertyName("physicalWidth")] public int PhysicalWidth { get; set; }
+    [JsonPropertyName("physicalHeight")] public int PhysicalHeight { get; set; }
+    [JsonPropertyName("identitySchemaVersion")] public int IdentitySchemaVersion { get; set; } = 1;
+    [JsonPropertyName("physicalIdentity")] public MonitorIdentity PhysicalIdentity { get; set; } = new();
     [JsonPropertyName("physicalDevice")]
     public string PhysicalDevice { get; set; } = string.Empty;
 
@@ -20,6 +24,7 @@ public sealed class CompositorConfig
 
 public sealed class CompositorSegment
 {
+    [JsonPropertyName("identity")] public MonitorIdentity Identity { get; set; } = new();
     [JsonPropertyName("virtualDevice")]
     public string VirtualDevice { get; set; } = string.Empty;
 

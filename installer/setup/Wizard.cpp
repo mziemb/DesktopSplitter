@@ -1,14 +1,17 @@
 #include "Wizard.h"
 #include "InstallEngine.h"
+#include "FileMaintenancePolicy.h"
 #include "Edition.h"
 #include "Payload.h"
 #include "resource.h"
 
 #include <commctrl.h>
 #include <shlobj.h>
+#include <shellapi.h>
 #include <strsafe.h>
 #include <stdio.h>
 #include <process.h>
+#include <string>
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -50,6 +53,7 @@ namespace
         bool Finished = false;
         bool Cancelled = false;
         int  Result = 0;
+        std::wstring LastError, LogPath;
         bool LaunchApp = true;
         bool RemoveCert = false;
 
@@ -127,7 +131,11 @@ namespace
         case WizardPage::Welcome:  return Un ? L"Remove DesktopSplitter" : L"Welcome to DesktopSplitter";
         case WizardPage::Options:  return Un ? L"Removal options" : L"Installation options";
         case WizardPage::Progress: return Un ? L"Removing" : L"Installing";
-        case WizardPage::Finish:   return Un ? L"Removal complete" : L"Installation complete";
+        case WizardPage::Finish:
+            if (W->Result == ExitRestartRequired) return RestartFinishTitle(Un);
+            if (W->Result == ExitPendingRemoval) return L"Restart required before installation";
+            if (W->Result != ExitSuccess) return L"Setup did not complete";
+            return Un ? L"Removal complete" : L"Installation verified";
         default:                   return L"";
         }
     }
@@ -145,7 +153,10 @@ namespace
         case WizardPage::Progress:
             return L"This can take a minute. Your screen may flicker.";
         case WizardPage::Finish:
-            return Un ? L"DesktopSplitter has been removed." : L"DesktopSplitter is ready to use.";
+            if (W->Result == ExitRestartRequired) return RestartFinishSubtitle(Un);
+            if (W->Result == ExitPendingRemoval) return L"Previous removal is pending; installation was not performed.";
+            if (W->Result != ExitSuccess) return L"A mandatory stage failed. Review the diagnostic log.";
+            return Un ? L"DesktopSplitter has been removed." : L"DesktopSplitter passed installation verification.";
         default:
             return L"";
         }
@@ -339,7 +350,7 @@ namespace
 
         if (Finish)
         {
-            wchar_t Text[1024];
+            wchar_t Text[4096];
             if (W->Result == ExitSuccess)
             {
                 if (W->Mode == WizardMode::Uninstall)
@@ -357,17 +368,21 @@ namespace
                         W->Options.InstallDir);
                 }
             }
+            else if (W->Result == ExitRestartRequired)
+            {
+                StringCchPrintfW(Text, ARRAYSIZE(Text), L"%s\r\n\r\nLog: %s",
+                    RestartFinishInstructions(W->Mode == WizardMode::Uninstall), W->LogPath.c_str());
+            }
             else
             {
                 StringCchPrintfW(Text, ARRAYSIZE(Text),
-                    L"Setup did not complete (code %d).\r\n\r\n"
-                    L"The log on the previous page shows which step failed. Nothing else was changed.",
-                    W->Result);
+                    L"Setup did not complete (installer exit %d). Partial changes may remain.\r\nLog: %s\r\n\r\n%s", W->Result, W->LogPath.c_str(), W->LastError.c_str());
             }
             SetWindowTextW(W->Body, Text);
         }
 
-        EnableWindow(W->BtnBack, (Options && !W->Running) ? TRUE : FALSE);
+        EnableWindow(W->BtnBack, ((Options && !W->Running) || (Finish && !W->LogPath.empty())) ? TRUE : FALSE);
+        SetWindowTextW(W->BtnBack, Finish ? L"View log" : L"Back");
         EnableWindow(W->BtnNext, (!Progress || W->Finished) ? TRUE : FALSE);
         EnableWindow(W->BtnCancel, Finish ? FALSE : TRUE);
 
@@ -574,6 +589,12 @@ namespace
                 return 0;
 
             case IDC_BTN_BACK:
+                if (W->Page == WizardPage::Finish && !W->LogPath.empty()) {
+                    std::wstring args = L"\"" + W->LogPath + L"\"";
+                    HINSTANCE opened = ShellExecuteW(Window, L"open", L"notepad.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+                    if (reinterpret_cast<INT_PTR>(opened) <= 32) MessageBoxW(Window, W->LogPath.c_str(), L"Open this log manually", MB_OK | MB_ICONWARNING);
+                    return 0;
+                }
                 if (W->Page == WizardPage::Options) ShowPage(W, WizardPage::Welcome);
                 return 0;
 
@@ -609,6 +630,9 @@ namespace
 
         case WM_WIZ_DETAIL:
         {
+            const wchar_t* detail = reinterpret_cast<const wchar_t*>(lParam);
+            const wchar_t prefix[] = L"Persistent log: ";
+            if (wcsncmp(detail, prefix, ARRAYSIZE(prefix) - 1) == 0) W->LogPath = detail + ARRAYSIZE(prefix) - 1;
             wchar_t Line[1100];
             StringCchPrintfW(Line, ARRAYSIZE(Line), L"      %s", reinterpret_cast<const wchar_t*>(lParam));
             AppendLog(W, Line);
@@ -617,6 +641,7 @@ namespace
 
         case WM_WIZ_ERROR:
         {
+            W->LastError = reinterpret_cast<const wchar_t*>(lParam);
             wchar_t Line[1100];
             StringCchPrintfW(Line, ARRAYSIZE(Line), L"      ERROR: %s", reinterpret_cast<const wchar_t*>(lParam));
             AppendLog(W, Line);

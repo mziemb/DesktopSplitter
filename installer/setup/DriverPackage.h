@@ -3,14 +3,19 @@
 #pragma once
 
 #include <windows.h>
+#include <string>
 
 namespace DeskSplit
 {
+    struct IStepSink;
     enum class InstallMethod
     {
         DiInstallDriver,    // newdev.dll!DiInstallDriverW
         PnpUtil             // pnputil.exe /add-driver <inf> /install
     };
+
+    // Stages this exact INF and returns its published OEM filename; old packages are retained.
+    DWORD StageExactDriverPackage(const wchar_t* InfPath, std::wstring& PublishedName);
 
     // Installs (stages + binds) the driver package identified by InfPath.
     // Returns a Win32 error code; ERROR_SUCCESS on success.
@@ -22,7 +27,8 @@ namespace DeskSplit
         _In_z_ const wchar_t* InfPath,
         _Out_ InstallMethod* pMethod,
         _Out_ bool* pRebootRequired,
-        _Out_ bool* pAlreadyCurrent);
+        _Out_ bool* pAlreadyCurrent,
+        IStepSink* pSink = nullptr);
 
     // Finds the oemNN.inf name in %WINDIR%\INF that corresponds to our package,
     // by matching the [Version] CatalogFile entry. Returns false if not staged.

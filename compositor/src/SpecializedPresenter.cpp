@@ -1,4 +1,5 @@
 #include "SpecializedPresenter.h"
+#include "MonitorUtil.h"
 #include "Log.h"
 
 // C++/WinRT and the SDK projections are not /W4-clean and this project builds
@@ -209,21 +210,6 @@ const wchar_t* ManagerResultName(wddc::DisplayManagerResult r) {
 
 } // namespace
 
-std::wstring MonitorInterfacePathForDevice(const std::wstring& gdiDeviceName) {
-    DISPLAY_DEVICEW adapter = {};
-    adapter.cb = sizeof(adapter);
-    for (DWORD ai = 0; ::EnumDisplayDevicesW(nullptr, ai, &adapter, 0); ++ai) {
-        if (::_wcsicmp(adapter.DeviceName, gdiDeviceName.c_str()) != 0) continue;
-        DISPLAY_DEVICEW mon = {};
-        mon.cb = sizeof(mon);
-        if (::EnumDisplayDevicesW(adapter.DeviceName, 0, &mon,
-                                  EDD_GET_DEVICE_INTERFACE_NAME)) {
-            return mon.DeviceID;
-        }
-    }
-    return std::wstring();
-}
-
 // ---------------------------------------------------------------------------
 
 struct SpecializedPresenter::Impl {
@@ -310,24 +296,18 @@ void SpecializedPresenter::RequestResize(UINT, UINT) {
     // tears the whole compositor down instead.
 }
 
-bool SpecializedPresenter::CacheTargetIdentity(const std::wstring& gdiDeviceName) {
-    Impl& s = *m_impl;
-    if (!s.interfacePath.empty()) return true;
-    s.interfacePath = MonitorInterfacePathForDevice(gdiDeviceName);
-    if (s.interfacePath.empty()) {
-        DS_WARN(L"specialized: '%s' has no device interface path. dscomp must be "
-                L"started BEFORE the display is removed from the desktop.",
-                gdiDeviceName.c_str());
-        return false;
-    }
-    DS_VERB(L"specialized: cached target identity %s", s.interfacePath.c_str());
-    return true;
-}
-
 // One acquisition attempt. Safe to call repeatedly while polling.
 bool SpecializedPresenter::TryAcquireOnce(const PresenterInit& init,
                                           SpecializedAvailability& out) {
     Impl& s = *m_impl;
+    // A user may take up to 90 seconds to toggle specialization. Revalidate each attempt,
+    // rather than allowing a reused cached device path to acquire a different panel.
+    MonitorObservation current;
+    if (!ResolveMonitorIdentity(init.cfg->physicalIdentity, current, false)) {
+        out.detail = L"physical monitor identity changed or became ambiguous";
+        return false;
+    }
+    s.interfacePath = current.identity.monitorDevicePath;
     s.device = init.device;
     s.ctx = init.ctx;
     s.ctxMutex = init.ctxMutex;
@@ -652,7 +632,12 @@ bool SpecializedPresenter::TryAcquire(const PresenterInit& init,
     Impl& s = *m_impl;
     s.frameDeadlineSeconds = frameDeadlineSeconds;
 
-    CacheTargetIdentity(init.cfg->physicalDevice);
+    MonitorObservation resolved;
+    if (!ResolveMonitorIdentity(init.cfg->physicalIdentity, resolved, false)) {
+        out.detail = L"physical stable identity is missing or ambiguous";
+        return false;
+    }
+    s.interfacePath = resolved.identity.monitorDevicePath;
 
     const ULONGLONG start = ::GetTickCount64();
     ULONGLONG lastLog = 0;

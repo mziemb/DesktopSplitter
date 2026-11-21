@@ -28,7 +28,7 @@ public:
 
     // 'coveredDevice' - the physical monitor dscomp hides.
     // 'targetDevice'  - segment 1's virtual monitor (config segments[0]).
-    bool Start(const std::wstring& coveredDevice, const std::wstring& targetDevice);
+    bool Start(const MonitorIdentity& coveredIdentity, const MonitorIdentity& targetIdentity);
     void Stop();
 
     // Display topology changed (re-basing moves every rect): drop cached rects.
@@ -48,6 +48,7 @@ private:
     bool RefreshRects();
     bool RateLimit(HWND hwnd);
 
+    MonitorIdentity m_coveredIdentity, m_targetIdentity;
     std::wstring m_coveredDevice;
     std::wstring m_targetDevice;
 
