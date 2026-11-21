@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -56,9 +57,21 @@ public partial class MainWindow : Window, IHidingUi
         _viewModel.LoadPreferences();
 
         Title = string.IsNullOrEmpty(MainViewModel.VersionText)
-            ? "DesktopSplitter"
-            : $"DesktopSplitter {MainViewModel.VersionText}";
+            ? "DesktopSplitter MZ"
+            : $"DesktopSplitter MZ {MainViewModel.VersionText}";
         VersionLabel.Text = MainViewModel.VersionText;
+    }
+
+    private void About_Click(object sender, RoutedEventArgs e)
+    {
+        var metadata = typeof(MainWindow).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>();
+        string Read(string key) => metadata.FirstOrDefault(attribute => attribute.Key == key)?.Value ?? "Unavailable";
+
+        MessageBox.Show(this,
+            $"Release: MZ {MainViewModel.VersionText}\n" +
+            $"Build date (UTC): {Read("BuildDateUtc")}\n" +
+            $"Build number: {Read("BuildNumber")}",
+            "About DesktopSplitter MZ", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void IdentityDetails_Click(object sender, RoutedEventArgs e)
