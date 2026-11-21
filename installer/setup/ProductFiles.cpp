@@ -1,4 +1,9 @@
 #include "ProductFiles.h"
+#include "InstallEngine.h"
+#include "FileMaintenancePolicy.h"
+#include <vector>
+#include <algorithm>
+#include <string>
 #include "Payload.h"
 #include "resource.h"
 
@@ -9,6 +14,8 @@
 #include <shobjidl.h>
 #include <objbase.h>
 #include <tlhelp32.h>
+#include <RestartManager.h>
+#pragma comment(lib, "Rstrtmgr.lib")
 #include <strsafe.h>
 
 #include "DeskSplitProtocol.h"
@@ -227,8 +234,85 @@ namespace DeskSplit
         return GetLastError();
     }
 
+    DWORD PrepareProductFile(const wchar_t* Path, IStepSink* Sink)
+    {
+        DWORD attributes = GetFileAttributesW(Path);
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            DWORD error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? ERROR_SUCCESS : error;
+        }
+        if (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) return ERROR_ACCESS_DENIED;
+        if (attributes & FILE_ATTRIBUTE_READONLY) {
+            DWORD writable = attributes & ~FILE_ATTRIBUTE_READONLY;
+            if (!writable) writable = FILE_ATTRIBUTE_NORMAL;
+            if (!SetFileAttributesW(Path, writable)) {
+                DWORD error = GetLastError();
+                if (Sink) Sink->OnError((L"Cannot clear ReadOnly on product file: " + std::wstring(Path) + L" Win32=" + std::to_wstring(error)).c_str());
+                return error;
+            }
+            if (Sink) Sink->OnDetail((L"Cleared ReadOnly on known product file (ACL unchanged): " + std::wstring(Path)).c_str());
+        }
+        return ERROR_SUCCESS;
+    }
+
+    DWORD CheckProductFilesWritable(const wchar_t* InstallDir, IStepSink* Sink)
+    {
+        std::vector<std::wstring> paths = {std::wstring(InstallDir) + L"\\" + kSetupCopyName};
+        for (const auto& file : kProductFiles) paths.push_back(std::wstring(InstallDir) + L"\\" + file.Name);
+        for (const auto& path : paths) {
+            DWORD attributes = GetFileAttributesW(path.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES) {
+                DWORD error = GetLastError();
+                if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
+                return error;
+            }
+            DWORD error = PrepareProductFile(path.c_str(), Sink);
+            if (!error) {
+                HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr); // Probe only: never truncate/write.
+                if (file == INVALID_HANDLE_VALUE) error = GetLastError();
+                else CloseHandle(file);
+            }
+            if (error) {
+                if (Sink) Sink->OnError((L"Product file is locked or not writable before PnP changes: " + path + L" Win32=" + std::to_wstring(error)).c_str());
+                return error;
+            }
+        }
+        return ERROR_SUCCESS;
+    }
+
+    DWORD CheckPendingProductRemoval(const wchar_t* InstallDir, IStepSink* Sink)
+    {
+        HKEY key = nullptr;
+        LONG rc = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager", 0,
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key);
+        if (rc != ERROR_SUCCESS) return static_cast<DWORD>(rc);
+        DWORD type = 0, bytes = 0;
+        rc = RegQueryValueExW(key, L"PendingFileRenameOperations", nullptr, &type, nullptr, &bytes);
+        if (rc == ERROR_FILE_NOT_FOUND) { RegCloseKey(key); return ERROR_SUCCESS; }
+        if (rc != ERROR_SUCCESS || type != REG_MULTI_SZ || bytes > 1024 * 1024 || bytes % sizeof(wchar_t)) {
+            RegCloseKey(key); return rc ? static_cast<DWORD>(rc) : ERROR_INVALID_DATA;
+        }
+        if (!bytes) { RegCloseKey(key); return ERROR_SUCCESS; }
+        std::vector<wchar_t> data(bytes / sizeof(wchar_t), 0);
+        rc = RegQueryValueExW(key, L"PendingFileRenameOperations", nullptr, &type, reinterpret_cast<BYTE*>(data.data()), &bytes);
+        RegCloseKey(key);
+        if (rc != ERROR_SUCCESS) return static_cast<DWORD>(rc);
+        if (type != REG_MULTI_SZ || bytes % sizeof(wchar_t)) return ERROR_INVALID_DATA;
+        data.resize(bytes / sizeof(wchar_t));
+        std::vector<std::wstring> pairs;
+        if (!ParsePendingRenamePairs(data, pairs)) return ERROR_INVALID_DATA;
+        std::vector<std::wstring> owned = {InstallDir, std::wstring(InstallDir) + L"\\" + kSetupCopyName};
+        for (const auto& file : kProductFiles) owned.push_back(std::wstring(InstallDir) + L"\\" + file.Name);
+        std::wstring pending;
+        if (!HasPendingProductDeletion(pairs, owned, pending)) return ERROR_SUCCESS;
+        if (Sink) Sink->OnError((L"Previous removal is pending: " + pending +
+            L". Restart Windows before installing again; no pending system operations were changed.").c_str());
+        return ERROR_SUCCESS_REBOOT_REQUIRED;
+    }
+
     _Use_decl_annotations_
-    DWORD InstallProductFiles(const wchar_t* InstallDir, DWORD* pBytesWritten)
+    DWORD InstallProductFiles(const wchar_t* InstallDir, DWORD* pBytesWritten, IStepSink* Sink)
     {
         *pBytesWritten = 0;
 
@@ -246,9 +330,11 @@ namespace DeskSplit
                 return ERROR_BUFFER_OVERFLOW;
             }
 
-            Error = WriteResourceToFile(File.Resource, Path);
+            Error = PrepareProductFile(Path, Sink);
+            if (!Error) Error = WriteResourceToFile(File.Resource, Path);
             if (Error != ERROR_SUCCESS)
             {
+                if (Sink) Sink->OnError((L"Cannot write product file: " + std::wstring(Path) + L" Win32=" + std::to_wstring(Error)).c_str());
                 return Error;
             }
 
@@ -271,9 +357,12 @@ namespace DeskSplit
 
         if (_wcsicmp(SelfPath, SetupTarget) != 0)
         {
-            if (!CopyFileW(SelfPath, SetupTarget, FALSE))
-            {
-                return GetLastError();
+            Error = PrepareProductFile(SetupTarget, Sink);
+            if (!Error && !CopyFileW(SelfPath, SetupTarget, FALSE)) Error = GetLastError();
+            if (!Error) Error = PrepareProductFile(SetupTarget, Sink); // CopyFile inherits source attributes.
+            if (Error) {
+                if (Sink) Sink->OnError((L"Cannot replace installed setup: " + std::wstring(SetupTarget) + L" source=" + SelfPath + L" Win32=" + std::to_wstring(Error)).c_str());
+                return Error;
             }
 
             LARGE_INTEGER Size = {};
@@ -293,122 +382,88 @@ namespace DeskSplit
     }
 
     _Use_decl_annotations_
-    DWORD CreateShortcuts(const InstallOptions* pOptions)
+    DWORD CreateShortcuts(const InstallOptions* options)
     {
-        wchar_t AppPath[MAX_PATH] = {};
-        if (FAILED(StringCchPrintfW(AppPath, ARRAYSIZE(AppPath), L"%s\\DesktopSplitter.exe", pOptions->InstallDir)))
-        {
-            return ERROR_BUFFER_OVERFLOW;
+        wchar_t app[MAX_PATH] = {}, setup[MAX_PATH] = {}, link[MAX_PATH] = {};
+        if (FAILED(StringCchPrintfW(app, ARRAYSIZE(app), L"%s\\DesktopSplitter.exe", options->InstallDir)) ||
+            FAILED(StringCchPrintfW(setup, ARRAYSIZE(setup), L"%s\\%s", options->InstallDir, kSetupCopyName))) return ERROR_BUFFER_OVERFLOW;
+        HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        if (FAILED(init) && init != RPC_E_CHANGED_MODE) return static_cast<DWORD>(init);
+        DWORD result = ERROR_SUCCESS;
+        auto create = [&](int folder, const wchar_t* sub, const wchar_t* name, const wchar_t* target) {
+            if (result) return;
+            if (!GetShortcutPath(folder, sub, name, link, ARRAYSIZE(link))) { result = ERROR_PATH_NOT_FOUND; return; }
+            HRESULT hr = WriteShortcut(link, target, options->InstallDir, L"DesktopSplitter");
+            if (FAILED(hr)) result = static_cast<DWORD>(hr);
+        };
+        if (options->DesktopShortcut) create(CSIDL_COMMON_DESKTOPDIRECTORY, nullptr, L"DesktopSplitter.lnk", app);
+        if (options->StartMenuShortcut) {
+            create(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"DesktopSplitter.lnk", app);
+            create(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"Uninstall DesktopSplitter.lnk", setup);
         }
-
-        const HRESULT ComInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        DWORD Result = ERROR_SUCCESS;
-
-        if (pOptions->DesktopShortcut)
-        {
-            wchar_t Link[MAX_PATH] = {};
-            if (GetShortcutPath(CSIDL_COMMON_DESKTOPDIRECTORY, nullptr, L"DesktopSplitter.lnk", Link, ARRAYSIZE(Link)))
-            {
-                const HRESULT hr = WriteShortcut(Link, AppPath, pOptions->InstallDir, L"Split one monitor into several");
-                if (FAILED(hr))
-                {
-                    Result = static_cast<DWORD>(hr);
-                }
-            }
-        }
-
-        if (pOptions->StartMenuShortcut)
-        {
-            wchar_t Link[MAX_PATH] = {};
-            if (GetShortcutPath(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"DesktopSplitter.lnk", Link, ARRAYSIZE(Link)))
-            {
-                const HRESULT hr = WriteShortcut(Link, AppPath, pOptions->InstallDir, L"Split one monitor into several");
-                if (FAILED(hr))
-                {
-                    Result = static_cast<DWORD>(hr);
-                }
-            }
-
-            wchar_t Uninstall[MAX_PATH] = {};
-            wchar_t SetupPath[MAX_PATH] = {};
-            StringCchPrintfW(SetupPath, ARRAYSIZE(SetupPath), L"%s\\%s", pOptions->InstallDir, kSetupCopyName);
-            if (GetShortcutPath(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"Uninstall DesktopSplitter.lnk",
-                                Uninstall, ARRAYSIZE(Uninstall)))
-            {
-                WriteShortcut(Uninstall, SetupPath, pOptions->InstallDir, L"Remove DesktopSplitter");
-            }
-        }
-
-        if (SUCCEEDED(ComInit))
-        {
-            CoUninitialize();
-        }
-
-        return Result;
+        if (SUCCEEDED(init)) CoUninitialize();
+        return result;
     }
 
-    void RemoveShortcuts()
+    DWORD RemoveShortcuts()
     {
-        wchar_t Link[MAX_PATH] = {};
-
-        if (GetShortcutPath(CSIDL_COMMON_DESKTOPDIRECTORY, nullptr, L"DesktopSplitter.lnk", Link, ARRAYSIZE(Link)))
-        {
-            DeleteFileW(Link);
-        }
-        if (GetShortcutPath(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"DesktopSplitter.lnk", Link, ARRAYSIZE(Link)))
-        {
-            DeleteFileW(Link);
-        }
-        if (GetShortcutPath(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"Uninstall DesktopSplitter.lnk", Link, ARRAYSIZE(Link)))
-        {
-            DeleteFileW(Link);
-        }
-
-        wchar_t Folder[MAX_PATH] = {};
-        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_PROGRAMS, nullptr, SHGFP_TYPE_CURRENT, Folder)))
-        {
-            wchar_t Sub[MAX_PATH] = {};
-            if (SUCCEEDED(StringCchPrintfW(Sub, ARRAYSIZE(Sub), L"%s\\%s", Folder, kStartMenuFolder)))
-            {
-                RemoveDirectoryW(Sub);
-            }
-        }
+        wchar_t link[MAX_PATH] = {};
+        auto remove = [&](int folder, const wchar_t* sub, const wchar_t* name) -> DWORD {
+            if (!GetShortcutPath(folder, sub, name, link, ARRAYSIZE(link))) return ERROR_PATH_NOT_FOUND;
+            if (DeleteFileW(link)) return ERROR_SUCCESS;
+            DWORD error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? ERROR_SUCCESS : error;
+        };
+        DWORD error = remove(CSIDL_COMMON_DESKTOPDIRECTORY, nullptr, L"DesktopSplitter.lnk");
+        if (!error) error = remove(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"DesktopSplitter.lnk");
+        if (!error) error = remove(CSIDL_COMMON_PROGRAMS, kStartMenuFolder, L"Uninstall DesktopSplitter.lnk");
+        return error;
     }
 
     _Use_decl_annotations_
     DWORD WriteUninstallEntry(const InstallOptions* pOptions, DWORD EstimatedSizeKb)
     {
         wchar_t SetupPath[MAX_PATH] = {};
-        StringCchPrintfW(SetupPath, ARRAYSIZE(SetupPath), L"%s\\%s", pOptions->InstallDir, kSetupCopyName);
+        if (FAILED(StringCchPrintfW(SetupPath, ARRAYSIZE(SetupPath), L"%s\\%s", pOptions->InstallDir, kSetupCopyName))) return ERROR_BUFFER_OVERFLOW;
 
         wchar_t UninstallCommand[MAX_PATH + 32] = {};
-        StringCchPrintfW(UninstallCommand, ARRAYSIZE(UninstallCommand), L"\"%s\" /uninstall", SetupPath);
+        if (FAILED(StringCchPrintfW(UninstallCommand, ARRAYSIZE(UninstallCommand), L"\"%s\" /uninstall", SetupPath))) return ERROR_BUFFER_OVERFLOW;
 
         wchar_t QuietCommand[MAX_PATH + 32] = {};
-        StringCchPrintfW(QuietCommand, ARRAYSIZE(QuietCommand), L"\"%s\" /uninstall /quiet", SetupPath);
+        if (FAILED(StringCchPrintfW(QuietCommand, ARRAYSIZE(QuietCommand), L"\"%s\" /uninstall /quiet", SetupPath))) return ERROR_BUFFER_OVERFLOW;
 
         wchar_t AppPath[MAX_PATH] = {};
-        StringCchPrintfW(AppPath, ARRAYSIZE(AppPath), L"%s\\DesktopSplitter.exe", pOptions->InstallDir);
+        if (FAILED(StringCchPrintfW(AppPath, ARRAYSIZE(AppPath), L"%s\\DesktopSplitter.exe", pOptions->InstallDir))) return ERROR_BUFFER_OVERFLOW;
 
         DWORD Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"DisplayName", kProductName);
         if (Error != ERROR_SUCCESS) return Error;
 
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"DisplayVersion", kProductVersion);
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"Publisher", kPublisher);
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"InstallLocation", pOptions->InstallDir);
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"UninstallString", UninstallCommand);
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"QuietUninstallString", QuietCommand);
-        WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"DisplayIcon", AppPath);
-        WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"EstimatedSize", EstimatedSizeKb);
-        WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"NoModify", 1);
-        WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"NoRepair", 1);
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"DisplayVersion", kProductVersion);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"Publisher", kPublisher);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"InstallLocation", pOptions->InstallDir);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"UninstallString", UninstallCommand);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"QuietUninstallString", QuietCommand);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"DisplayIcon", AppPath);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"EstimatedSize", EstimatedSizeKb);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"NoModify", 1);
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegDword(HKEY_LOCAL_MACHINE, kUninstallRegKey, L"NoRepair", 1);
+        if (Error != ERROR_SUCCESS) return Error;
 
         return ERROR_SUCCESS;
     }
 
-    void RemoveUninstallEntry()
+    DWORD RemoveUninstallEntry()
     {
-        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kUninstallRegKey, KEY_WOW64_64KEY, 0);
+        LONG error = RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kUninstallRegKey, KEY_WOW64_64KEY, 0);
+        return error == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : static_cast<DWORD>(error);
     }
 
     _Use_decl_annotations_
@@ -417,85 +472,87 @@ namespace DeskSplit
         DWORD Error = WriteRegString(HKEY_LOCAL_MACHINE, kProductRegKey, L"InstallLocation", pOptions->InstallDir);
         if (Error != ERROR_SUCCESS) return Error;
 
-        WriteRegString(HKEY_LOCAL_MACHINE, kProductRegKey, L"Version", kProductVersion);
+        Error = WriteRegString(HKEY_LOCAL_MACHINE, kProductRegKey, L"Version", kProductVersion);
+
+        if (Error != ERROR_SUCCESS) return Error;
 
         // Consumed by the app / compositor; the installer only records intent.
-        WriteRegDword(HKEY_LOCAL_MACHINE, kProductRegKey, L"HidePhysicalDisplaySupported",
+        Error = WriteRegDword(HKEY_LOCAL_MACHINE, kProductRegKey, L"HidePhysicalDisplaySupported",
                       pOptions->HidePhysicalDisplaySupported ? 1u : 0u);
-        WriteRegDword(HKEY_LOCAL_MACHINE, kProductRegKey, L"HidePhysicalDisplay",
+        if (Error != ERROR_SUCCESS) return Error;
+        Error = WriteRegDword(HKEY_LOCAL_MACHINE, kProductRegKey, L"HidePhysicalDisplay",
                       (pOptions->HidePhysicalDisplaySupported && pOptions->HidePhysicalDisplay) ? 1u : 0u);
 
-        return ERROR_SUCCESS;
+        return Error;
     }
 
-    void RemoveProductFlags()
+    DWORD RemoveProductFlags()
     {
-        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kProductRegKey, KEY_WOW64_64KEY, 0);
-    }
-
-    _Use_decl_annotations_
-    bool ReadInstalledState(wchar_t* InstallDir, size_t DirChars, wchar_t* Version, size_t VerChars)
-    {
-        if (DirChars) InstallDir[0] = L'\0';
-        if (VerChars) Version[0] = L'\0';
-
-        HKEY Key = nullptr;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kUninstallRegKey, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
-        {
-            return false;
-        }
-
-        DWORD Type = 0;
-        DWORD Bytes = static_cast<DWORD>(DirChars * sizeof(wchar_t));
-        RegQueryValueExW(Key, L"InstallLocation", nullptr, &Type, reinterpret_cast<BYTE*>(InstallDir), &Bytes);
-
-        Type = 0;
-        Bytes = static_cast<DWORD>(VerChars * sizeof(wchar_t));
-        RegQueryValueExW(Key, L"DisplayVersion", nullptr, &Type, reinterpret_cast<BYTE*>(Version), &Bytes);
-
-        RegCloseKey(Key);
-        return InstallDir[0] != L'\0';
+        LONG error = RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kProductRegKey, KEY_WOW64_64KEY, 0);
+        return error == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : static_cast<DWORD>(error);
     }
 
     _Use_decl_annotations_
-    DWORD RemoveProductFiles(const wchar_t* InstallDir)
+    bool ReadInstalledState(wchar_t* directory, size_t dirChars, wchar_t* version, size_t versionChars)
     {
-        if (InstallDir == nullptr || InstallDir[0] == L'\0')
-        {
+        if (!dirChars || !versionChars) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+        directory[0] = version[0] = 0;
+        HKEY key = nullptr;
+        LONG error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kUninstallRegKey, 0, KEY_QUERY_VALUE, &key);
+        if (error != ERROR_SUCCESS) { SetLastError(static_cast<DWORD>(error)); return false; }
+        auto read = [&](const wchar_t* name, wchar_t* value, size_t chars) -> LONG {
+            DWORD type = 0, size = static_cast<DWORD>(chars * sizeof(wchar_t));
+            LONG rc = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(value), &size);
+            if (rc != ERROR_SUCCESS) return rc;
+            if (type != REG_SZ || size < sizeof(wchar_t) || size > chars * sizeof(wchar_t) || value[size / sizeof(wchar_t) - 1] != 0 || !value[0]) return ERROR_INVALID_DATA;
             return ERROR_SUCCESS;
+        };
+        error = read(L"InstallLocation", directory, dirChars);
+        if (!error) error = read(L"DisplayVersion", version, versionChars);
+        RegCloseKey(key);
+        SetLastError(static_cast<DWORD>(error));
+        return error == ERROR_SUCCESS;
+    }
+
+    _Use_decl_annotations_
+    DWORD RemoveProductFiles(const wchar_t* InstallDir, IStepSink* Sink)
+    {
+        if (!InstallDir || !InstallDir[0]) return ERROR_INVALID_PARAMETER;
+        wchar_t self[MAX_PATH] = {};
+        DWORD length = GetModuleFileNameW(nullptr, self, ARRAYSIZE(self));
+        if (!length) return GetLastError();
+        if (length >= ARRAYSIZE(self)) return ERROR_INSUFFICIENT_BUFFER;
+        auto remove = [Sink](const std::wstring& path) -> DWORD {
+            DWORD prepared = PrepareProductFile(path.c_str(), Sink);
+            if (prepared) return prepared;
+            if (DeleteFileW(path.c_str())) return ERROR_SUCCESS;
+            DWORD error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? ERROR_SUCCESS : error;
+        };
+        for (const ProductFile& file : kProductFiles) {
+            DWORD error = remove(std::wstring(InstallDir) + L"\\" + file.Name);
+            if (error) return error;
         }
-
-        wchar_t SelfPath[MAX_PATH] = {};
-        GetModuleFileNameW(nullptr, SelfPath, ARRAYSIZE(SelfPath));
-
-        for (const ProductFile& File : kProductFiles)
-        {
-            wchar_t Path[MAX_PATH] = {};
-            if (SUCCEEDED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"%s\\%s", InstallDir, File.Name)))
-            {
-                DeleteFileW(Path);
-            }
+        std::wstring setup = std::wstring(InstallDir) + L"\\" + kSetupCopyName;
+        bool restart = _wcsicmp(self, setup.c_str()) == 0;
+        if (restart) {
+            DWORD prepared = PrepareProductFile(setup.c_str(), Sink);
+            if (prepared) return prepared;
+            if (!MoveFileExW(setup.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT)) return GetLastError();
+            if (Sink) Sink->OnDetail((L"Scheduled deletion after restart (file still present): " + setup).c_str());
+            // Windows deletes a directory only if empty. Unrelated user files are preserved.
+            if (!MoveFileExW(InstallDir, nullptr, MOVEFILE_DELAY_UNTIL_REBOOT)) return GetLastError();
+            if (Sink) Sink->OnDetail((L"Scheduled empty-directory cleanup after restart: " + std::wstring(InstallDir)).c_str());
+        } else {
+            DWORD error = remove(setup);
+            if (error) return error;
         }
-
-        wchar_t SetupPath[MAX_PATH] = {};
-        if (SUCCEEDED(StringCchPrintfW(SetupPath, ARRAYSIZE(SetupPath), L"%s\\%s", InstallDir, kSetupCopyName)))
-        {
-            if (_wcsicmp(SelfPath, SetupPath) == 0)
-            {
-                // We are running from the copy being removed: it cannot be
-                // deleted now, so let the OS drop it on the next boot.
-                MoveFileExW(SetupPath, nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
-            }
-            else
-            {
-                DeleteFileW(SetupPath);
-            }
+        if (!RemoveDirectoryW(InstallDir)) {
+            DWORD error = GetLastError();
+            // Preserve unrelated user files and the running setup scheduled for deletion.
+            if (error != ERROR_DIR_NOT_EMPTY && error != ERROR_PATH_NOT_FOUND) return error;
         }
-
-        // Only succeeds when empty, which is what we want: never delete files
-        // the user put there.
-        RemoveDirectoryW(InstallDir);
-        return ERROR_SUCCESS;
+        return restart ? ERROR_SUCCESS_REBOOT_REQUIRED : ERROR_SUCCESS;
     }
 
     void SignalCompositorStop()
@@ -510,6 +567,128 @@ namespace DeskSplit
     }
 
     _Use_decl_annotations_
+    DWORD QuiesceProductProcesses(const wchar_t* InstallDir, int* pStoppedCount, IStepSink* Sink, const std::function<bool()>& ConfirmIdleForForce)
+    {
+        *pStoppedCount = 0;
+        DWORD ownSession = 0;
+        if (!ProcessIdToSessionId(GetCurrentProcessId(), &ownSession)) return GetLastError();
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return GetLastError();
+        struct Running { DWORD pid; HANDLE process; FILETIME created; std::wstring path; };
+        std::vector<Running> running;
+        DWORD error = ERROR_SUCCESS;
+        PROCESSENTRY32W entry = {}; entry.dwSize = sizeof(entry);
+        BOOL found = Process32FirstW(snapshot, &entry);
+        if (!found && GetLastError() != ERROR_NO_MORE_FILES) error = GetLastError();
+        while (found) {
+            if (!_wcsicmp(entry.szExeFile, L"DesktopSplitter.exe") || !_wcsicmp(entry.szExeFile, L"dscomp.exe")) {
+                HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, entry.th32ProcessID);
+                if (!process) { error = GetLastError(); break; }
+                wchar_t actual[32768] = {}; DWORD chars = ARRAYSIZE(actual), session = 0;
+                std::wstring expected = std::wstring(InstallDir) + L"\\" + entry.szExeFile;
+                FILETIME created = {}, exit = {}, kernel = {}, user = {};
+                if (!QueryFullProcessImageNameW(process, 0, actual, &chars) || !ProcessIdToSessionId(entry.th32ProcessID, &session) ||
+                    !GetProcessTimes(process, &created, &exit, &kernel, &user)) error = GetLastError();
+                else if (_wcsicmp(actual, expected.c_str()) || session != ownSession) error = ERROR_BUSY;
+                if (Sink) Sink->OnDetail((L"Process candidate PID=" + std::to_wstring(entry.th32ProcessID) + L" path=" + actual + L" session=" + std::to_wstring(session) + L" identity_error=" + std::to_wstring(error)).c_str());
+                if (error) { CloseHandle(process); break; }
+                running.push_back({entry.th32ProcessID, process, created, actual});
+            }
+            found = Process32NextW(snapshot, &entry);
+            if (!found && GetLastError() != ERROR_NO_MORE_FILES) error = GetLastError();
+        }
+        CloseHandle(snapshot);
+        // Validate every candidate first. Let the app restore displays before stopping dscomp.
+        std::stable_sort(running.begin(), running.end(), [](const Running& a, const Running& b) {
+            bool appA = _wcsicmp(a.path.substr(a.path.find_last_of(L'\\') + 1).c_str(), L"DesktopSplitter.exe") == 0;
+            bool appB = _wcsicmp(b.path.substr(b.path.find_last_of(L'\\') + 1).c_str(), L"DesktopSplitter.exe") == 0;
+            return appA && !appB;
+        });
+        if (!error) {
+            const UINT exitMessage = RegisterWindowMessageW(L"DesktopSplitter.InstallerExit.v1");
+            struct CloseContext { DWORD pid; UINT message; bool busy = false, acknowledged = false; DWORD windows = 0, messageError = 0; };
+            for (const auto& process : running) {
+                if (WaitForSingleObject(process.process, 0) == WAIT_OBJECT_0) { ++*pStoppedCount; continue; }
+                CloseContext context = {process.pid, exitMessage};
+                EnumWindows([](HWND window, LPARAM value) -> BOOL {
+                    auto& ctx = *reinterpret_cast<CloseContext*>(value);
+                    DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+                    if (pid != ctx.pid) return TRUE;
+                    ++ctx.windows;
+                    DWORD_PTR reply = 0;
+                    if (ctx.message && SendMessageTimeoutW(window, ctx.message, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &reply)) {
+                        if (reply == 2) { ctx.busy = true; return FALSE; }
+                        if (reply == 1) { ctx.acknowledged = true; return TRUE; }
+                    } else ctx.messageError = GetLastError();
+                    return TRUE;
+                }, reinterpret_cast<LPARAM>(&context));
+                if (Sink) Sink->OnDetail((L"IPC probe PID=" + std::to_wstring(process.pid) + L" windows=" + std::to_wstring(context.windows) + L" ack=" + std::to_wstring(context.acknowledged) + L" busy=" + std::to_wstring(context.busy) + L" last_message_Win32=" + std::to_wstring(context.messageError)).c_str());
+                if (context.busy) { error = ERROR_BUSY; if (Sink) Sink->OnError(L"Application refused installer shutdown while Apply/Revert is running; no forced termination."); break; }
+                if (!context.acknowledged) {
+                    EnumWindows([](HWND window, LPARAM value) -> BOOL {
+                        DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+                        if (pid == static_cast<DWORD>(value)) PostMessageW(window, WM_CLOSE, 0, 0);
+                        return TRUE;
+                    }, static_cast<LPARAM>(process.pid));
+                }
+                DWORD wait = WaitForSingleObject(process.process, context.acknowledged ? 25000 : 1500);
+                if (wait == WAIT_TIMEOUT && !context.acknowledged) {
+                    DWORD session = 0; wchar_t key[CCH_RM_SESSION_KEY + 1] = {};
+                    error = RmStartSession(&session, 0, key);
+                    if (!error) {
+                        RM_UNIQUE_PROCESS application = {process.pid, process.created};
+                        error = RmRegisterResources(session, 0, nullptr, 1, &application, 0, nullptr);
+                        if (!error) error = RmShutdown(session, 0, nullptr); // Never RmForceShutdown.
+                        if (Sink) Sink->OnDetail((L"Restart Manager graceful shutdown PID=" + std::to_wstring(process.pid) + L" Win32=" + std::to_wstring(error)).c_str());
+                        DWORD ended = RmEndSession(session); if (!error) error = ended;
+                    }
+                    wait = WaitForSingleObject(process.process, error ? 0 : 15000);
+                }
+                if (wait == WAIT_TIMEOUT && !context.acknowledged && ConfirmIdleForForce &&
+                    (error == ERROR_FAIL_SHUTDOWN || error == ERROR_SUCCESS)) {
+                    // Never force a different user, a reused PID, an acknowledged recovery,
+                    // or an unverified display state. Keep the original process handle alive.
+                    HANDLE target = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, process.pid);
+                    DWORD forceError = target ? ERROR_SUCCESS : GetLastError();
+                    HANDLE ownToken = nullptr, targetToken = nullptr;
+                    if (target && (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &ownToken) || !OpenProcessToken(target, TOKEN_QUERY, &targetToken))) forceError = GetLastError();
+                    auto userSid = [](HANDLE token, std::vector<BYTE>& data) -> bool {
+                        DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+                        if (!size) return false;
+                        data.resize(size); return GetTokenInformation(token, TokenUser, data.data(), size, &size) != FALSE;
+                    };
+                    std::vector<BYTE> ownUser, targetUser;
+                    if (!forceError && (!userSid(ownToken, ownUser) || !userSid(targetToken, targetUser))) forceError = GetLastError();
+                    if (!forceError && !EqualSid(reinterpret_cast<TOKEN_USER*>(ownUser.data())->User.Sid, reinterpret_cast<TOKEN_USER*>(targetUser.data())->User.Sid)) forceError = ERROR_ACCESS_DENIED;
+                    FILETIME created = {}, exited = {}, kernel = {}, user = {};
+                    wchar_t path[32768] = {}; DWORD chars = ARRAYSIZE(path), session = 0;
+                    if (!forceError && (!GetProcessTimes(target, &created, &exited, &kernel, &user) || !QueryFullProcessImageNameW(target, 0, path, &chars) || !ProcessIdToSessionId(process.pid, &session))) forceError = GetLastError();
+                    if (!forceError && (CompareFileTime(&created, &process.created) || _wcsicmp(path, process.path.c_str()) || session != ownSession)) forceError = ERROR_ACCESS_DENIED;
+                    if (!forceError && !ConfirmIdleForForce()) forceError = ERROR_BUSY;
+                    if (!forceError) {
+                        if (Sink) Sink->OnDetail((L"Force-close permitted after idle/recovery checks: PID=" + std::to_wstring(process.pid) + L" path=" + process.path).c_str());
+                        if (!TerminateProcess(target, ERROR_PROCESS_ABORTED)) forceError = GetLastError();
+                        else {
+                            wait = WaitForSingleObject(target, 10000);
+                            if (wait != WAIT_OBJECT_0) forceError = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+                        }
+                    }
+                    if (ownToken) CloseHandle(ownToken);
+                    if (targetToken) CloseHandle(targetToken);
+                    if (target) CloseHandle(target);
+                    if (Sink) Sink->OnDetail((L"Force-close result PID=" + std::to_wstring(process.pid) + L" Win32=" + std::to_wstring(forceError) + L" wait=" + std::to_wstring(wait)).c_str());
+                    error = forceError;
+                }
+                if (Sink) Sink->OnDetail((L"Shutdown result PID=" + std::to_wstring(process.pid) + L" path=" + process.path + L" IPC_ack=" + std::to_wstring(context.acknowledged) + L" wait=" + std::to_wstring(wait)).c_str());
+                if (wait == WAIT_OBJECT_0) { ++*pStoppedCount; error = ERROR_SUCCESS; }
+                else if (!error) error = wait == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError();
+                if (error) break;
+            }
+        }
+        for (const auto& process : running) CloseHandle(process.process);
+        return error;
+    }
+
     void StopRunningProcesses(int* pStoppedCount)
     {
         *pStoppedCount = 0;

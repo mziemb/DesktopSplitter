@@ -73,6 +73,7 @@ public static class SystemSettingsAdminFlowsClient
     public static AdminFlowResult TryRun(
         MonitorInfo monitor, bool enable, IProgress<string> log, CancellationToken ct)
     {
+        monitor = MonitorIdentityStore.Resolve(monitor.StableMonitorId, requireActive: enable);
         if (!IsAvailable)
         {
             return new AdminFlowResult(false, $"{ExecutablePath} not found.") { NotAttempted = true };

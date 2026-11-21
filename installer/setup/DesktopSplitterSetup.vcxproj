@@ -92,8 +92,12 @@
   </Target>
   <ItemGroup>
     <ClCompile Include="Setup.cpp" />
+    <ClCompile Include="SetupRuntime.cpp" />
     <ClCompile Include="Wizard.cpp" />
     <ClCompile Include="InstallEngine.cpp" />
+    <ClCompile Include="InstallLog.cpp" />
+    <ClCompile Include="InstalledVerification.cpp" />
+    <ClCompile Include="..\..\compositor\src\Json.cpp" />
     <ClCompile Include="ProductFiles.cpp" />
     <ClCompile Include="Edition.cpp" />
     <ClCompile Include="Payload.cpp" />
@@ -105,6 +109,11 @@
   <ItemGroup>
     <ClInclude Include="Wizard.h" />
     <ClInclude Include="InstallEngine.h" />
+    <ClInclude Include="InstallPolicy.h" />
+    <ClInclude Include="SetupRuntime.h" />
+    <ClInclude Include="FileMaintenancePolicy.h" />
+    <ClInclude Include="InstallLog.h" />
+    <ClInclude Include="InstalledVerification.h" />
     <ClInclude Include="ProductFiles.h" />
     <ClInclude Include="Edition.h" />
     <ClInclude Include="Payload.h" />

@@ -7,6 +7,7 @@ namespace DesktopSplitter.Services;
 /// <summary>Reads/writes %APPDATA%\DesktopSplitter\settings.json (last applied UI state).</summary>
 public static class SettingsStore
 {
+    private static readonly object Gate = new();
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = true,
@@ -32,9 +33,24 @@ public static class SettingsStore
         }
     }
 
-    public static void Save(AppSettings settings)
+    public static void Save(AppSettings settings) => SaveTo(FilePath, settings);
+
+    // The same file transaction is tested against a temporary directory without user settings.
+    internal static void SaveTo(string filePath, AppSettings settings)
     {
-        System.IO.Directory.CreateDirectory(Directory);
-        File.WriteAllText(FilePath, JsonSerializer.Serialize(settings, Options));
+        lock (Gate)
+        {
+            System.IO.Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
+            // Retain exact legacy bytes before the first write, including preference-only writes.
+            if (File.Exists(filePath) && !File.Exists(filePath + ".pre-identity.bak"))
+            {
+                var old = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(filePath), Options);
+                if (old is null) throw new InvalidDataException("Invalid settings; refusing to overwrite.");
+                if (!old.HasConfirmedIdentity) File.Copy(filePath, filePath + ".pre-identity.bak");
+            }
+            string temp = filePath + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(settings, Options));
+            File.Move(temp, filePath, true);
+        }
     }
 }

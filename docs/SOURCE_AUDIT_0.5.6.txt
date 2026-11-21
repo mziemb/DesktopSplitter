@@ -1,0 +1,433 @@
+DESKTOPSPLITTER v0.5.6 SOURCE AUDIT
+
+Historical baseline report
+
+This report describes the implementation at commit 3950a5a4b56b566f1c3655c7027ece374beae3cd, before subsequent monitor-management improvements. Findings, line references, CI observations and recommendations apply to that baseline, not automatically to the current implementation. The feature-specific documents describe later changes. This English translation preserves the original report's findings and distinction between code defects and unverified hardware hypotheses.
+
+The main baseline weaknesses are the absence of a coherent display-configuration transaction and stable monitor identification. Existing safeguards include operation locking, a confirmation countdown and Desktop Duplication retries, but do not cover every failure, repeated Apply or crash-recovery path.
+
+Scope: mziemb/DesktopSplitter, main, commit 3950a5a4b56b566f1c3655c7027ece374beae3cd:
+https://github.com/mziemb/DesktopSplitter/tree/3950a5a4b56b566f1c3655c7027ece374beae3cd
+VERSION contains 0.5.6.
+
+The original audit changed no files, performed no builds, created no commits or pull requests and made no driver, registry or display-configuration changes. It is static analysis supplemented by reading CI results, without Windows hardware testing.
+
+1. ARCHITECTURE AND COMPONENT RESPONSIBILITIES
+
+Component | Implementation | Responsibility
+Control application | app/, C#, WPF, .NET 8, x64 | Split editor, Apply/Revert, settings, tray, confirmation
+Display orchestration | app/Services/ApplyService.cs | Driver configuration, monitor discovery, placement, Compositor launch, hiding the physical display
+Windows integration | app/Interop/ | DisplayConfig, ChangeDisplaySettingsEx, EDID, IOCTL, monitor specialization
+Compositor | compositor/src/, C++, dscomp.exe | Capturing virtual desktops through DXGI Desktop Duplication and composing them on a physical monitor
+Presentation | WindowPresenter.cpp, SpecializedPresenter.cpp | A window covering the physical display or direct presentation through DisplayManager
+Cursor and windows | CursorConfine.cpp, WindowRescuer.cpp | Excluding the covered monitor from cursor movement and relocating windows from its area
+Session changes | SessionWatcher.cpp, SplitSuspensionWatcher.cs | Lock, UAC, session switching and manual suspension
+Driver | driver/Driver.cpp, Edid.cpp, Timing.cpp | IddCx/UMDF virtual adapter, monitor creation/removal, modes, EDID
+Installer and build | installer/, build.ps1, .github/workflows/build.yml | Application/driver packaging, toolchain signing, installer self-checks
+
+The driver does not send image data to the Compositor through a private channel. It drains IddCx swapchains; dscomp.exe independently captures virtual monitor desktops through Desktop Duplication.
+
+The application has two substantially different modes:
+
+- Windowed: Samsung remains part of the Windows desktop and the Compositor covers it.
+- Specialized: Samsung is removed from the desktop and the Compositor attempts to acquire it through DisplayManager.
+
+Three physical and two virtual displays give five desktop displays in normal mode, or four after successfully hiding Samsung. Three virtual displays give six or five respectively. Display count alone does not confirm successful hiding.
+
+2. BASELINE APPLY AND REVERT SEQUENCES
+
+ApplyService.Apply() / ApplyCore():
+
+1. Validate resolutions and save a simplified snapshot of the previous split.
+2. Stop the existing Compositor.
+3. Remember physical display names and the previous primary display.
+4. Send IOCTL_DESKSPLIT_SET_CONFIG.
+5. Wait for monitors.
+6. Assign segments using EDID serial numbers, falling back to DISPLAYn ordering.
+7. Place virtual monitors to the right of the physical display and make the first primary.
+8. Write config.json.
+9. Launch the Compositor, optionally specializing the physical display.
+10. Save settings.
+11. For manual Apply, show a countdown and potentially roll back.
+
+RevertCore():
+
+1. Stop the Compositor.
+2. Attempt to restore the hidden monitor.
+3. Restore the physical primary display.
+4. Send a configuration with zero virtual monitors.
+5. Wait up to 10 seconds for their disappearance.
+6. Mark the split inactive.
+
+The sequence is broadly reasonable. The main problems are incomplete result checking and losing information required for recovery.
+
+3. DEFECTS CONFIRMED BY CODE ANALYSIS
+
+"Confirmed" means the defect exists in the baseline implementation. It does not establish that it caused a particular symptom on the reported computer.
+
+Priorities: P0 — risk of losing working output or recovery; P1 — core-operation stability; P2 — process quality and reliability.
+
+P-01 — Apply does not roll back after a failure midway through the operation. P0
+
+Source: app/Services/ApplyService.cs, Apply(), ApplyCore(), RollBackTo(); app/ViewModels/MainViewModel.cs, ApplyAsync().
+https://github.com/mziemb/DesktopSplitter/blob/3950a5a4b56b566f1c3655c7027ece374beae3cd/app/Services/ApplyService.cs#L135
+
+ApplyCore() stops the Compositor, changes driver configuration, display placement and the primary display without an encompassing exception-compensation mechanism. ApplyAsync() catches exceptions and displays a message but does not restore the preceding configuration. RollBackTo() is called after countdown rejection, not after every Apply failure.
+
+Impact: placement, configuration-write or Compositor-launch failures can leave virtual monitors active without correct output.
+
+Proposed fix: a transaction recording the initial state and completed stages, with compensation after any stage failure. Recovery needs its own timeout and an independent cancellation token.
+
+P-02 — DISPLAYn is used as monitor identity. P0
+
+Sources:
+- app/ViewModels/MainViewModel.cs: LoadMonitors(), RestoreSettings();
+- app/Services/ApplyService.cs: FindLive(), RestorePrimaryBeforeTeardown(), ApplyCore();
+- app/Models/AppSettings.cs;
+- compositor/src/MonitorUtil.cpp: FindMonitorRect();
+- compositor/src/Capture.cpp: ResolveOutput().
+https://github.com/mziemb/DesktopSplitter/blob/3950a5a4b56b566f1c3655c7027ece374beae3cd/app/Models/AppSettings.cs#L8
+
+PhysicalDevice, PreviousPrimaryDevice, AppliedPrimaryDevice and SpecializedDevice are stored as GDI names. RestoreSettings() matches DeviceName before the friendly name. If Samsung changes from DISPLAY3 to DISPLAY2 and another display receives DISPLAY3, the wrong monitor can be accepted without checking physical identity.
+
+MonitorDevicePath, EDID and adapter/target data exist in MonitorInfo, but are not the system-wide identification contract.
+
+Proposed fix: stable identity using monitor paths and EDID evidence, with explicit ambiguity handling. Resolve the current DISPLAYn immediately before operations. LUID/target ID alone is also unsuitable as persistent identity across reboots.
+
+P-03 — Hidden-monitor recovery searches only active displays. P0
+
+Source: app/Services/ApplyService.cs, around lines 713–749, ClearSpecializationIfOurs(), RecoverStaleSpecialization(), FindLive(); app/Interop/DisplayConfig.cs, QueryActiveConfig().
+https://github.com/mziemb/DesktopSplitter/blob/3950a5a4b56b566f1c3655c7027ece374beae3cd/app/Services/ApplyService.cs#L713
+
+FindLive() uses enumeration based on QDC_ONLY_ACTIVE_PATHS. A monitor successfully removed from the desktop may be absent. ClearSpecializationIfOurs() also clears settings.SpecializedDevice when the monitor cannot be found, its state cannot be read or restoration fails.
+
+Impact: the application can lose the record of a monitor still requiring restoration.
+
+Proposed fix: enumerate connected targets including inactive ones, use stable identity and clear recovery records only after confirming the display is back on the desktop.
+
+P-04 — Repeated Apply does not correctly handle an already hidden monitor. P1
+
+Source: ApplyService.ApplyCore(), lines 254–256; LaunchCompositor(); compositor/src/Main.cpp, Run().
+https://github.com/mziemb/DesktopSplitter/blob/3950a5a4b56b566f1c3655c7027ece374beae3cd/compositor/src/Main.cpp#L355
+
+Apply stops the Compositor and then requires the physical monitor to be active, without first restoring a monitor hidden by the previous split. dscomp startup also resolves the physical monitor by GDI name before acquiring its target.
+
+Impact: repeated Apply in specialized mode can stop working output and then fail.
+
+Proposed fix: explicitly transition from an existing split by restoring the physical target or safely retaining/transferring ownership during reconfiguration.
+
+P-05 — Starting a process is treated as starting a working split. P0
+
+Sources: ApplyService.StartPlain(), CompositorLauncher.Start(), MainViewModel.ApplyAsync(); compositor/src/Main.cpp, Run(); compositor/src/Renderer.cpp, RenderFrame().
+
+Normal mode checks Process.Start() success but does not wait for renderer initialization, the first frame of every segment or the first successful presentation. SegmentCapture::Start() starts a thread; DuplicateOutput() runs later. The renderer skips segments without frames, leaving black background.
+
+Specialized mode has a first-presentation signal, which does not prove that every segment has supplied an image. No supervision of Compositor exit after confirmed Apply was found.
+
+Proposed fix: a session-specific readiness/health protocol, ready only after every segment's first frame and successful presentation. A later crash should restore the physical display and trigger controlled recreation or Revert.
+
+P-06 — Waiting for virtual monitors may classify a physical display as virtual. P1
+
+Source: ApplyService.WaitForVirtualMonitors(), lines 1029–1053; MapSegmentsToMonitors(), lines 950–992.
+
+The qualification condition is:
+
+    m.IsDeskSplitVirtual || !baseline.Contains(m.DeviceName)
+
+Any monitor with a new GDI name becomes a candidate, including a physical monitor rediscovered during Apply. Failed EDID mapping falls back to DISPLAYn ordering despite an explicit warning about possible incorrect assignment.
+
+Proposed fix: wait for the exact driver-monitor index set; ambiguity must stop and roll back Apply. A new GDI name is not proof of virtual-monitor identity.
+
+P-07 — Placement may overlap another physical monitor. P1
+
+Source: app/Interop/DisplayArranger.cs, ComputePlacements(), ComposeLayout().
+https://github.com/mziemb/DesktopSplitter/blob/3950a5a4b56b566f1c3655c7027ece374beae3cd/app/Interop/DisplayArranger.cs#L37
+
+The virtual area always starts at physical.PositionX + physical.CurrentWidth. Other physical monitors retain their positions; intersections and overall layout reachability are not checked.
+
+Impact: another monitor to Samsung's right may overlap the proposed rectangles. In windowed mode, the excluded Samsung rectangle can also form a barrier between other desktop areas.
+
+Proposed fix: validate collisions and layout connectivity before system changes, considering all physical displays and actual cursor-accessible shared edges.
+
+P-08 — A partial configuration failure does not stop final placement commitment. P1
+
+Source: DisplayArranger.ApplyLayout().
+
+Individual settings are staged using CDS_UPDATEREGISTRY | CDS_NORESET. Errors are collected, but ChangeDisplaySettingsExApply() still runs.
+
+Impact: only part of the intended layout may be committed; persisted settings may affect the next operation.
+
+Proposed fix: validate the entire layout first and restore previous settings if staging fails. Consider coherent SetDisplayConfig validation, application and readback.
+
+P-09 — Revert may report success despite incomplete restoration. P0
+
+Source: ApplyService.RevertCore(), RestorePrimaryBeforeTeardown(), ClearSpecializationIfOurs(), SafeEnumerate().
+
+- Failed Compositor shutdown does not stop later changes.
+- Failed specialization restoration does not prevent virtual-display removal.
+- Primary-display switch failure is not propagated.
+- After the 10-second wait, removal is always reported.
+- SafeEnumerate() converts enumeration failure into an empty list, satisfying Revert's "no virtual monitors" condition.
+
+Proposed fix: return detailed Revert results, distinguish absent monitors from an unreliable read and confirm postconditions before reporting success.
+
+P-10 — The snapshot cannot exactly restore the previous desktop. P1
+
+Source: AppliedSnapshot, CaptureAppliedSnapshot(), RollBackTo(), RestorePrimaryBeforeTeardown().
+
+The snapshot stores split parameters but not full topology: all display positions/modes, orientation, target activity and complete primary-display state. Revert restores the primary using current geometry rather than the full pre-Apply configuration.
+
+Proposed fix: separate user configuration from the actual system snapshot; persist the complete recovery topology before the first change.
+
+P-11 — Blocking operations remain on the UI thread. P1
+
+Sources:
+- MainViewModel constructor, LoadMonitors(), OnDisplayChanged(), RefreshDriverStatus(), RevertOnExit();
+- DriverClient.GetStatus() / OpenDevice();
+- SplitSuspensionWatcher.Stop();
+- App.ExitApplication().
+
+Main Apply/Revert operations correctly use Task.Run(). However, UI code synchronously performs QueryDisplayConfig, SetupDi/EDID and mode enumeration, synchronous DeviceIoControl() without an application timeout, Thread.Join() for up to three seconds and full exit cleanup. WM_DISPLAYCHANGE also triggers enumeration on the dispatcher during topology changes.
+
+Proposed fix: one system-operation queue outside the UI, coalesced refresh requests and publication of completed snapshots on the dispatcher. IOCTL waiting needs a controlled timeout.
+
+P-12 — The safety countdown depends on a functioning dispatcher. P0
+
+Source: app/ViewModels/ApplyConfirmer.cs, ConfirmApply(); HidingViewModel.SpecializationUi.ConfirmKeep().
+
+Synchronous dispatcher.Invoke() occurs before the bounded wait and again after timeout, before returning to rollback.
+
+Impact: a stuck UI prevents the countdown from guaranteeing restoration after the advertised 15 seconds.
+
+Proposed fix: a UI-independent watchdog and rollback. Closing the confirmation window should be an asynchronous side effect rather than a prerequisite for recovery.
+
+P-13 — Suspension-watcher lifecycle is inconsistent with repeated Apply. P1
+
+Source: MainViewModel.StartSuspensionWatcher(), ApplyAsync(); SplitSuspensionWatcher.Start(), EnsureHandles(), Stop(); SessionWatcher::Start().
+
+Repeated Apply does not stop the old watcher. Start() updates device names but does not reopen event handles when its thread already runs. Existing handles can retain old Compositor events. In C++, CreateEventW() initial state does not reset an existing event; the new Compositor does not explicitly normalize both events at startup.
+
+Stop() also discards its thread reference and closes handles after an unconfirmed Join().
+
+Proposed fix: split-generation IDs, explicit old-watcher detachment, normalized IPC state and confirmed thread termination before restart.
+
+P-14 — Hot-plug refreshes geometry without rebuilding configuration identity. P1
+
+Sources: MainWindow.WndProc(), MainViewModel.OnDisplayChanged(); compositor/src/Main.cpp, OnDisplayChange(); Capture.cpp, InitDuplication().
+
+The application refreshes its monitor list; the Compositor resolves the physical monitor using the same GDI name. Capture threads recreate duplication after errors but retain the old virtualDevice. There is no overarching reconciliation after name changes. The inspected window procedures do not handle WM_POWERBROADCAST; session handling does not replace sleep/resume support.
+
+Specialized mode additionally uses an HWND_MESSAGE window, which does not receive general broadcasts like a normal top-level window.
+
+Proposed fix: shared re-enumeration and identity resolution after topology changes, resume and device loss. Notifications must trigger state reconciliation, not merely label refreshes.
+
+P-15 — Specialized presentation does not explicitly preserve portrait orientation. P1
+
+Source: SpecializedPresenter::TryAcquireOnce(), lines 412–480; Renderer::RenderFrame(); configuration generated by ApplyCore().
+
+The Compositor chooses a mode using the target's preferred resolution and derives dimensions from TargetResolution(). It does not explicitly transfer or restore Samsung's desktop orientation. Segment rectangles instead use current desktop dimensions, for example 1080×1920.
+
+Confirmed defect: no explicit orientation contract between the application and specialized presenter. Whether this Samsung actually receives a 1920×1080 buffer requires testing.
+
+Proposed fix: include orientation in configuration and explicitly define transformations between desktop pixels, the render buffer and the physical panel.
+
+P-16 — Driver state may diverge from Windows after monitor-removal failure. P1
+
+Source: driver/Driver.cpp, IndirectDeviceContext::ApplyConfig(), RemoveMonitorLocked().
+https://github.com/mziemb/DesktopSplitter/blob/3950a5a4b56b566f1c3655c7027ece374beae3cd/driver/Driver.cpp#L586
+
+RemoveMonitorLocked() marks a slot inactive and clears its data before checking IddCxMonitorDeparture(). ApplyConfig() only logs departure errors and may then recreate the monitor. Its final result collects creation failures without analogous removal-failure handling. Configuration is persisted before completion.
+
+Proposed fix: explicit slot states, retention of data until departure is resolved, error propagation and separation of requested versus applied configuration.
+
+P-17 — Swapchain-thread termination is not checked on every iteration. P1
+
+Source: driver/Driver.cpp, SwapChainProcessor::~SwapChainProcessor(), RunCore(), lines 313–422.
+
+The destructor waits indefinitely for the thread. The stop signal is checked only in the E_PENDING branch; a continuous stream of successful buffers bypasses it.
+
+Impact: prompt shutdown during reconfiguration is not guaranteed. An actual hang depends on IddCx behavior and load.
+
+Proposed fix: check stop at the start of each iteration and verify swapchain lifecycle. Do not free the object while its thread still uses this.
+
+P-18 — Settings and configuration writes are not atomic. P1
+
+Source: SettingsStore.Save(), ApplyService.WriteCompositorConfig().
+
+Both directly call File.WriteAllText(), without atomic replacement or shared synchronization of settings read-modify-write. SettingsStore.Load() hides every error as missing settings.
+
+Impact: interrupted writes or concurrent updates may lose recovery data.
+
+Proposed fix: temporary writes and atomic replacement, a last-known-good backup, serialized updates and separate handling of missing versus corrupt files.
+
+4. COMPOSITOR AND CURSOR ASSESSMENT
+
+Useful baseline mechanisms:
+- A separate capture thread per segment.
+- Duplication recreation after DXGI_ERROR_ACCESS_LOST.
+- Nonblocking AcquireNextFrame(0).
+- CPU staging for cross-adapter transfer.
+- ClipCursor restricted to cases where the permitted region is actually rectangular.
+- Specialized first-presentation signaling and detection of later presentation failures.
+
+Limitations:
+- CursorConfiner excludes the physical-monitor rectangle; it does not connect disconnected desktop regions.
+- Cursor transitions follow Windows geometry. A hook alone cannot repair an invalid layout.
+- The hook ignores LLMHF_INJECTED movement, requiring separate remote-control-tool testing.
+- OnSuspendStateChanged() reinstates confinement on resume even in specialized mode, whose startup deliberately skips it.
+- ConvertPointerShape() approximates XOR operations. This may affect appearance but does not explain blocked transitions.
+
+5. HYPOTHESES REQUIRING WINDOWS 11 TESTING
+
+Symptom: Output appears on only one physical display.
+Strongest code-based hypotheses: Partial layout commitment, incorrect monitor matching, capture not ready.
+Discriminating evidence: All-target snapshots before/after every stage, API results, first-frame counters.
+
+Symptom: White application window.
+Strongest code-based hypotheses: Dispatcher blocked by enumeration or IOCTL; alternatively WPF rendering after topology changes.
+Discriminating evidence: Stack captures during the symptom and dispatcher latency; then compare WPF rendering behavior.
+
+Symptom: Cursor cannot cross displays.
+Strongest code-based hypotheses: Geometry overlap, gap or barrier; stale covered-monitor name; hook behavior.
+Discriminating evidence: Recorded rectangles and cursor positions, every shared-edge test, comparison with --no-confine.
+
+Symptom: Samsung changes DISPLAYn.
+Strongest code-based hypothesis: Windows re-enumeration that the application handles incorrectly.
+Discriminating evidence: Compare monitor paths and EDID across successive GDI names.
+
+Symptom: Apply after Revert is unstable.
+Strongest code-based hypotheses: Incomplete Revert, driver departure state, lack of topology stabilization.
+Discriminating evidence: Confirm Revert postconditions and compare GET_STATUS with actual targets.
+
+Symptom: Desktop icons move.
+Strongest code-based hypotheses: Promoting a segment to primary, coordinate-origin changes, desktop-area changes and Explorer decisions.
+Discriminating evidence: Record primary display, geometry and icon positions throughout transitions.
+
+DISPLAY3 becoming DISPLAY2 is not itself evidence of a Windows defect. Relying on that name remaining unchanged is an application defect.
+
+Full topology restoration may reduce icon movement but cannot guarantee Explorer restores icon positions. Manipulating icon positions should not be the first repair.
+
+6. GITHUB ACTIONS AND BUILD PROCESS
+
+Baseline run 44128525876 succeeded. Its log confirms compilation of 0.5.6, signing of the driver DLL/catalog and installer self-checks:
+https://github.com/mziemb/DesktopSplitter/actions/runs/44128525876
+
+Baseline process:
+1. windows-2022.
+2. WDK and Visual Studio component installation.
+3. Toolchain diagnostics.
+4. build.ps1 -Configuration Release -NoVersionBump.
+5. Installer /verify and /selftest.
+6. Upload one installer artifact.
+
+Findings and limitations:
+
+Finding: GeometryProbe and PresenterProbe exist but are not run by build/workflow.
+Risk/priority: Geometry and presenter-selection regressions; P1.
+Proposal: Compile and run both in CI.
+
+Finding: No pull_request trigger.
+Risk/priority: Fork PRs receive no automatic validation through this workflow; P2.
+Proposal: Add PR validation with read-only permissions.
+
+Finding: SDK/WDK/toolchain versions are not fully pinned.
+Risk/priority: The same commit can build with different tools; P2.
+Proposal: Pin supported versions and record an environment manifest.
+
+Finding: stage-payload.ps1 accepts a signed catalog whose status is not Valid if it is not NotSigned and contains signer information.
+Risk/priority: Overly broad status acceptance; P1.
+Proposal: Distinguish expected development-certificate trust failures from integrity errors and other invalid conditions.
+
+Finding: The baseline run reports catalog status UnknownError.
+Risk/priority: CI success does not prove correct trust on a user's computer; P1.
+Proposal: Explain the exact status and validate package integrity independently of trust.
+
+Finding: build.ps1 may skip the driver/installer when dependencies are missing.
+Risk/priority: A local "Build complete" does not necessarily mean a complete product; P2.
+Proposal: Add a strict packaging mode.
+
+Finding: The installer uses the Release driver package even for another $Configuration.
+Risk/priority: Mixed local artifacts; P2.
+Proposal: Make packaging configuration explicit and verify all component versions.
+
+Green CI confirms compilation and package self-checks, not Apply/Revert, resume, three-physical-monitor operation or RDP behavior.
+
+7. SMALL-STAGE IMPLEMENTATION PLAN
+
+Stage 1 — Diagnostics.
+Scope: Operation IDs, topology snapshots, API timings, each stage's result, capture and presentation.
+Exit criterion: Every failed Apply can be assigned to a specific stage.
+
+Stage 2 — Stable identification.
+Scope: Stable identities including inactive monitors, plus settings migration.
+Exit criterion: Samsung remains identifiable after DISPLAYn changes; ambiguity stops operations.
+
+Stage 3 — Geometry validation.
+Scope: Collisions, shared edges, cursor reachability.
+Exit criterion: No invalid layout is sent to Windows.
+
+Stage 4 — Transactional recovery.
+Scope: Transactional Apply, verified Revert and a complete recovery snapshot.
+Exit criterion: Failure at any stage leads to a known final state.
+
+Stage 5 — Readiness and supervision.
+Scope: All-segment readiness, Compositor supervision and a UI-independent watchdog.
+Exit criterion: Dead capture never yields success; failures restore an accessible display.
+
+Stage 6 — UI responsiveness.
+Scope: Move blocking reads off the UI and safely stop watchers.
+Exit criterion: The dispatcher remains responsive during topology changes.
+
+Stage 7 — IPC and lifecycle.
+Scope: IPC generations, hot-plug, resume and RDP.
+Exit criterion: Old events and names cannot control a new split session.
+
+Stage 8 — Specialized-mode repair.
+Scope: Orientation, recovery and resume as a separate change.
+Exit criterion: Correct portrait output and safe recovery after target loss.
+
+Stage 9 — Driver lifecycle.
+Scope: Departure handling and thread termination.
+Exit criterion: Repeatable monitor creation/removal without state divergence.
+
+Stage 10 — CI.
+Scope: Tests, toolchain pinning and package validation.
+Exit criterion: Every change passes a reproducible check set.
+
+Deliver application, Compositor and driver changes separately to identify which fix resolves a symptom and limit regression scope.
+
+8. WINDOWS 11 TEST PLAN
+
+Use the reported configuration: two 1920×1080 displays and one portrait Samsung 1080×1920 at 60 Hz.
+
+Basic matrix:
+- Samsung split into two 1080×960 regions and three 1080×640 regions.
+- Windowed and specialized modes tested separately.
+- Samsung to the left, right and between the other displays.
+- Positive/negative coordinates and different vertical alignment.
+- A separate case where Samsung was primary before Apply.
+
+Functional sequences:
+1. At least 30 Apply → confirm → Revert cycles.
+2. Apply again without Revert; switch two → three segments and back.
+3. Reject the change and separately let the confirmation countdown expire.
+4. Inject controlled failures at IOCTL, waiting, placement, configuration-write, process-start and first-frame stages.
+5. Close the Compositor before and after confirmation.
+6. Power Samsung off/on and disconnect/reconnect its cable.
+7. Display blanking, sleep, resume, lock and unlock.
+8. UAC during Apply, after Apply and during repeated Apply.
+9. Connect/disconnect RDP, including /multimon, checking displays actually exposed to the session.
+10. Exit/restart after incomplete cleanup.
+
+Measure on every run:
+- Monitor identity and current DISPLAYn.
+- Active/inactive targets, modes, orientation and primary.
+- Agreement between driver status and Windows topology.
+- First-frame and presentation times for every segment.
+- UI dispatcher latency.
+- Cursor crossing every expected boundary in both directions.
+- Post-Revert state and icon/window behavior.
+
+Acceptance criteria: no false success, no hidden monitor left without output, repeatable restoration of three physical displays, no selected-device changes after renumbering, and working recovery timeout even with a blocked UI.
+
+The original recommendation was to prioritize diagnostics, stable identification and transactional recovery (stages 1–4) as the basis for safely resolving the remaining hypotheses. No fixes were implemented as part of the original audit.

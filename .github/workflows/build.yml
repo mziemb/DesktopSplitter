@@ -3,6 +3,8 @@ name: Build DesktopSplitter
 on:
   push:
     branches: ['**']
+  pull_request:
+    branches: ['**']
   workflow_dispatch:
 
 permissions:
@@ -13,6 +15,96 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  monitor-identity-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Test managed identity, resolution and migration (no display APIs)
+        run: dotnet run --project tests/MonitorIdentity/MonitorIdentity.Tests.csproj -c Release
+      - name: Test native identity matching (no display APIs)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror tests/MonitorIdentity/IdentityProbe.cpp -o /tmp/identity-probe
+          /tmp/identity-probe
+  installer-policy-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installer stages and rollback policy (mocks only; no PnP)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror tests/Installer/InstallPolicyTests.cpp -o /tmp/installer-policy-tests
+          /tmp/installer-policy-tests
+  installer-compile:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse installer scripts (no execution)
+        shell: pwsh
+        run: |
+          foreach ($file in Get-ChildItem installer -Filter '*.ps1') {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+      - name: Compile and link installer only (no payload, no PnP, no install)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+          $out = Join-Path $root 'work/installer-compile'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          $version = (Get-Content VERSION | Where-Object { $_.Trim() -and -not $_.TrimStart().StartsWith('#') } | Select-Object -Last 1).Trim()
+          @("#define DS_VERSION_WSTR L`"$version`"", "#define DS_VERSION_STR `"$version`"") | Set-Content (Join-Path $out 'Version.h') -Encoding ascii
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'MSVC toolchain not found' }
+          $sources = @(Get-ChildItem installer/setup -Filter '*.cpp' | ForEach-Object { '"' + $_.FullName + '"' })
+          $sources += '"' + (Join-Path $root 'installer/common/DeviceNode.cpp') + '"'
+          $sources += '"' + (Join-Path $root 'compositor/src/Json.cpp') + '"'
+          $cmd = @(
+            '@echo off',
+            ('call "' + $vs + '\Common7\Tools\VsDevCmd.bat" -arch=x64 >nul'),
+            ('cl /nologo /std:c++17 /EHsc /W4 /WX /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"' + $out + '" /I"' + $root + '\shared" ' + ($sources -join ' ') + ' /Fe:installer-compile.exe /link /SUBSYSTEM:WINDOWS setupapi.lib newdev.lib cfgmgr32.lib wintrust.lib crypt32.lib comctl32.lib shell32.lib ole32.lib oleaut32.lib advapi32.lib user32.lib gdi32.lib')
+          )
+          $cmd | Set-Content (Join-Path $out 'compile.cmd') -Encoding ascii
+          Push-Location $out
+          try { & cmd.exe /c compile.cmd; if ($LASTEXITCODE -ne 0) { throw "Installer compiler/linker failed: $LASTEXITCODE" } }
+          finally { Pop-Location }
+      - name: Test Windows file replacement and rollback (temporary files only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+          $out = Join-Path $root 'work/installer-compile'
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $sources = @(Get-ChildItem installer/setup -Filter '*.cpp' | Where-Object Name -ne 'Setup.cpp' | ForEach-Object { '"' + $_.FullName + '"' })
+          $sources += '"' + (Join-Path $root 'installer/common/DeviceNode.cpp') + '"'
+          $sources += '"' + (Join-Path $root 'compositor/src/Json.cpp') + '"'
+          $sources += '"' + (Join-Path $root 'tests/Installer/FileMaintenanceTests.cpp') + '"'
+          $cmd = @(
+            '@echo off',
+            ('call "' + $vs + '\Common7\Tools\VsDevCmd.bat" -arch=x64 >nul'),
+            ('cl /nologo /std:c++17 /EHsc /W4 /WX /utf-8 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"' + $out + '" /I"' + $root + '\shared" ' + ($sources -join ' ') + ' /Fe:file-maintenance-tests.exe /link /SUBSYSTEM:CONSOLE setupapi.lib newdev.lib cfgmgr32.lib wintrust.lib crypt32.lib comctl32.lib shell32.lib ole32.lib oleaut32.lib advapi32.lib user32.lib gdi32.lib')
+          )
+          $cmd | Set-Content (Join-Path $out 'file-tests.cmd') -Encoding ascii
+          Push-Location $out
+          try {
+            & cmd.exe /c file-tests.cmd
+            if ($LASTEXITCODE -ne 0) { throw "File test compilation failed: $LASTEXITCODE" }
+            & .\file-maintenance-tests.exe
+            if ($LASTEXITCODE -ne 0) { throw "File maintenance tests failed: $LASTEXITCODE" }
+          } finally { Pop-Location }
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Test actual hidden WPF installer endpoint (no display changes)
+        shell: pwsh
+        run: |
+          dotnet run --project tests/InstallerIpc/InstallerIpc.Tests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "WPF IPC tests failed: $LASTEXITCODE" }
   build:
     runs-on: windows-2022
     timeout-minutes: 90

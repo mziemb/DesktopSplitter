@@ -358,9 +358,10 @@ public sealed class HidingViewModel : ObservableObject
             });
 
             // The window's own timer only animates; THIS wait is the auto-revert authority.
-            bool gotAnswer = answered.Wait(TimeSpan.FromSeconds(timeoutSeconds + 1), ct);
-
-            dispatcher.Invoke(() => handle?.CloseFromHelper());
+            bool gotAnswer;
+            try { gotAnswer = answered.Wait(TimeSpan.FromSeconds(timeoutSeconds + 1), ct); }
+            catch (OperationCanceledException) { return false; }
+            finally { dispatcher.Invoke(() => handle?.CloseFromHelper()); }
 
             if (!gotAnswer)
             {
