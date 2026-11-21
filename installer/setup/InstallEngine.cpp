@@ -481,7 +481,7 @@ namespace DeskSplit
                 StageName(result.stage), kHardwareId, result.result.domain.c_str(), result.result.code, result.result.code,
                 result.result.detail.c_str(), result.restart ? 1u : 0u, (result.partial || backend.certChanged) ? 1u : 0u,
                 result.rollbackAttempted ? 1u : 0u, result.rollbackSucceeded ? 1u : 0u, log.Path().c_str());
-            log.OnDetail(L"Nie ustalono przyczyny, unless the explicit API evidence above identifies it. Keep the log and the matching timestamp/instance entries in setupapi.dev.log. Old driver packages and user settings were retained.");
+            log.OnDetail(L"The cause has not been established, unless the explicit API evidence above identifies it. Keep the log and the matching timestamp/instance entries in setupapi.dev.log. Old driver packages and user settings were retained.");
             switch (result.stage) {
             case InstallStage::Admin: return ExitNotElevated;
             case InstallStage::Preflight: return result.result.code == ERROR_SUCCESS_REBOOT_REQUIRED ? ExitPendingRemoval : ExitVerificationFailed;
@@ -510,7 +510,7 @@ namespace DeskSplit
         log.OnStep(L"Post-reboot installed product verification (no PnP changes)");
         auto result = VerifyInstalledProduct(&log);
         if (!result.ok) {
-            Errorf(&log, L"FAILED verification domain=%s code=%u (0x%08X): %s. Nie ustalono przyczyny beyond these API results. Log: %s",
+            Errorf(&log, L"FAILED verification domain=%s code=%u (0x%08X): %s. The cause has not been established beyond these API results. Log: %s",
                 result.domain.c_str(), result.code, result.code, result.detail.c_str(), log.Path().c_str());
             return ExitVerificationFailed;
         }

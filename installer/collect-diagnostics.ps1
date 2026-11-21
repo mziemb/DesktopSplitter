@@ -25,7 +25,7 @@ $processes = @(Get-Process DesktopSplitter, dscomp -ErrorAction SilentlyContinue
     Windows = [Environment]::OSVersion.VersionString
     Devices = $devices
     Processes = $processes
-    Cause = 'Nie ustalono przyczyny; this is evidence, not a hardware diagnosis.'
+    Cause = 'The cause has not been established; this is evidence, not a hardware diagnosis.'
 } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutputDirectory 'device-evidence.json') -Encoding utf8
 $setupLog = Join-Path $env:windir 'INF\setupapi.dev.log'
 if (Test-Path -LiteralPath $setupLog) {

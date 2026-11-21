@@ -1,7 +1,7 @@
 # Stable monitor identification (identity schema 1)
 
-This change targets `dev/codex-desktopsplitter`. It does not change the IddCx
-protocol, EDID generation, signing settings or the driver binary interface.
+Stable monitor identification preserves the IddCx protocol, EDID generation,
+signing settings and the driver binary interface.
 
 ## Model and trust boundaries
 

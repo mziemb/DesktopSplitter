@@ -1,7 +1,7 @@
 # Primary monitor preferences
 
-This implementation starts at dev/codex-desktopsplitter 3fb677e. It does not reuse
-or merge the abandoned primary-monitor-preservation branch.
+Primary monitor preferences preserve the original physical primary separately
+from the preferred primary used while a split is active.
 
 ## Roles and persistence
 
